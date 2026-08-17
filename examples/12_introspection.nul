@@ -1,0 +1,88 @@
+// ------------------------------------------------------------------
+// 12_introspection.nul — compile-time type introspection builtins.
+//
+//   type_id(x)    numeric id of x's type (compile-time constant)
+//   type_size(x)  size in bytes of x's type
+//   type_of(x)    the type's name as a string (printed raw, no \n)
+//   offset_of(S, "field")  byte offset of a struct field (C layout)
+//   align_of(S)            alignment of a struct in bytes
+//
+// The type-name keywords (i8..u64, bool, str/string, void, struct
+// names, pointer types like `i64^`) are values: they can be assigned
+// to variables, passed around, and compared with ==.
+// ------------------------------------------------------------------
+
+struct H
+{
+    a : u8,     // offset 0
+    b : u16,    // offset 2 (aligned to 2)
+    c : u32,    // offset 4 (aligned to 4)
+}
+
+fn main()
+{
+    // --- type_id ---------------------------------------------------
+    print(type_id(i8));     // 3
+    print(type_id(i64));    // 6
+    print(type_id(bool));   // 2
+    print(type_id(str));    // 12
+    print(type_id(u64));    // 10
+
+    // Compare a value's type against the type keywords.
+    x := 5;
+    print(type_id(x) == i64);
+    print(type_id(x) == i8);
+
+    // A cast changes the type.
+    print(type_id(x as u8) == u8);
+    print(type_id(x as i32) == i32);
+
+    // Boolean results compare against bool's id.
+    print(type_id(2 < 3) == type_id(bool));
+
+    // Pointers get the pointee's type id too.
+    p := &x;
+    print(type_id(p) == i64);
+
+    // --- type_size -------------------------------------------------
+    print(type_size(i8));   // 1
+    print(type_size(i16));  // 2
+    print(type_size(i32));  // 4
+    print(type_size(i64));  // 8
+    print(type_size(bool)); // 1
+
+    print(type_size(x));
+    print(type_size(x as u8));
+
+    // --- type_of: the type name as a string ------------------------
+    print(type_of(5));            // i64
+    print(type_of("hi"));         // string
+    print(type_of(true));         // bool
+    print(type_of(&x));           // i64^
+    print(type_of(&x as u8^));    // u8^
+
+    // Type keywords are values: assignable and comparable.
+    t := i16;
+    print(type_id(t) == i16);
+    print(type_size(t));
+
+    // A type in a conditional.
+    if type_id(x) == i64 {
+        print("x is i64\n");
+    }
+
+    // --- offset_of / align_of on structs ---------------------------
+    // H layout (C alignment): a:0, b:2, c:4; the struct is 8 bytes,
+    // aligned to 4.
+    print(offset_of(H, "a"));
+    print(offset_of(H, "b"));
+    print(offset_of(H, "c"));
+    print(align_of(H));
+
+    // Combined into arithmetic.
+    print(offset_of(H, "b") + align_of(H));  // 2 + 4 = 6
+    print(align_of(H) * 2 + offset_of(H, "c")); // 8 + 4 = 12
+
+    // The builtins run at compile time, so they compose freely.
+    print(type_size(t) * 4 + offset_of(H, "a")); // 2*4 + 0 = 8
+}

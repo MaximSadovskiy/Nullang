@@ -1,0 +1,45 @@
+// ------------------------------------------------------------------
+// 10_fizzbuzz.nul — the classic challenge, mixing most features.
+//
+// Prints 1..15, replacing multiples of 3 with "fizz", of 5 with
+// "buzz", and of both with "fizzbuzz". Demonstrates functions with
+// return types, modulo, if/elif/else, for loops, and string + int
+// printing. (`print` of an int adds a newline; strings are raw, so
+// the string versions below carry their own "\n".)
+//
+// Note: strings cannot be compared with ==, so classify() returns an
+// int code (0 = print the number, 1/2/3 = which word).
+// ------------------------------------------------------------------
+
+fn classify(n : i64) -> i64
+{
+    if n % 15 == 0 {
+        return 3;
+    } elif n % 3 == 0 {
+        return 2;
+    } elif n % 5 == 0 {
+        return 1;
+    }
+    return 0;
+}
+
+fn print_class(c : i64, n : i64)
+{
+    if c == 3 {
+        print("fizzbuzz\n");
+    } elif c == 2 {
+        print("fizz\n");
+    } elif c == 1 {
+        print("buzz\n");
+    } else {
+        print(n);
+    }
+}
+
+fn main()
+{
+    for i in 1..16 {
+        print_class(classify(i), i);
+    }
+    print("----\n");
+}

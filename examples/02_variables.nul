@@ -1,0 +1,52 @@
+// ------------------------------------------------------------------
+// 02_variables.nul — Variables, arithmetic and number types.
+//
+// `:=` declares a new variable (type inferred from the value).
+// `x : i64 = v` declares a variable with an explicit type.
+// `=` reassigns an existing variable. Types: i8 i16 i32 i64,
+// u8 u16 u32 u64, bool, str/string, void, pointers `T^`.
+// ------------------------------------------------------------------
+
+fn main()
+{
+    // Declaration with inferred type.
+    x := 7;
+    print(x);
+
+    // Reassignment.
+    x = x * 2;
+    print(x);
+
+    // Explicit typed declaration.
+    y : i64 = 3;
+    print(x + y);
+
+    // Arithmetic: + - * / % (integer division, C-style truncation).
+    print(21 / 2);   // 10
+    print(21 % 2);   // 1
+    print(2 + 3 * 4);   // 14  (precedence: * before +)
+    print((2 + 3) * 4); // 20  (parentheses override)
+
+    // Negative values are written as `0 - n` (no unary minus).
+    print(0 - 5);
+
+    // Casts narrow/widen with `as` (i8 stores low byte, sign-extended).
+    big := 300;
+    small := big as i8;
+    print(small);       // 300 mod 256 = 44
+
+    // Unsigned types: u8..u64 hold only non-negative values.
+    u := 200 as u8;
+    print(u);
+
+    // A string variable.
+    s := "nul";
+    print(s);
+    print("!\n");
+
+    // `as` also converts between string and bool and between
+    // ints and bools (non-zero becomes true).
+    print(true as i64);
+    print(0 as bool);
+    print(5 as bool);
+}

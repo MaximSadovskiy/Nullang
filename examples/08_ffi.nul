@@ -1,0 +1,67 @@
+// ------------------------------------------------------------------
+// 08_ffi.nul — Calling C functions (foreign function interface).
+//
+// `extern fn name(params) -> RetType` declares a function supplied by
+// the C runtime / system library (no body). Nul links executables
+// against the C standard library, so malloc/free/strlen/memcpy/puts
+// and friends are available on Linux (and the Windows CRT on Windows).
+//
+// `void^` is the generic pointer type; cast with `as` to use it.
+// Dereferencing a heap pointer writes through to allocated memory.
+// There is no pointer arithmetic: bytes are moved with memcpy or read
+// field-by-field through structs.
+// ------------------------------------------------------------------
+
+extern fn malloc(size : u64) -> void^
+extern fn free(ptr : void^)
+extern fn strlen(s : void^) -> u64
+extern fn abs(x : i64) -> i64
+extern fn memcpy(dst : void^, src : void^, n : u64) -> void^
+extern fn puts(s : void^) -> i64
+
+fn main()
+{
+    // strlen: length of a string (void^ = const char*).
+    print(strlen("hello"));
+    print(strlen(""));
+
+    // abs from libc.
+    print(abs(0 - 42));
+
+    // puts writes a string plus a newline (and returns a status).
+    puts("via puts");
+
+    // malloc returns void^; cast to a concrete pointer type.
+    buf := malloc(8) as u8^;
+
+    // Write through the pointer.
+    ^buf = 200;
+    print(^buf);
+
+    // 64-bit allocation, storing/reading an i64.
+    big := malloc(8) as i64^;
+    ^big = 1234567;
+    print(^big);
+    free(big);
+
+    // memcpy: copy bytes from one buffer to another.
+    src := malloc(4) as u8^;
+    dst := malloc(4) as u8^;
+    ^src = 77;
+    memcpy(dst, src, 1);
+    print(^dst);
+    free(src);
+    free(dst);
+
+    // Free the first buffer too.
+    free(buf);
+
+    // A void^ may be null; comparing to null is the usual check.
+    zero : void^ = null;
+    print(zero);
+    print(zero == null);
+
+    // Heap struct: allocate, treat as a struct pointer.
+    // (structs are passed by reference, so writes through the pointer
+    // fields are visible when read back).
+}

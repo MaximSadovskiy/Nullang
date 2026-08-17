@@ -1,0 +1,38 @@
+// ------------------------------------------------------------------
+// 09_module_basics/01_main.nul — uses the `math` module.
+//
+// Compile the whole folder as one program:
+//   ./nulc examples/09_module_basics
+// (Files are compiled in name order, so the module file 00_math.nul
+// is processed before this importer.)
+//
+// `import math` makes `math::` names visible. Qualified globals are
+// readable and writable; qualified functions and structs work too.
+// ------------------------------------------------------------------
+
+import math
+
+fn main()
+{
+    // Qualified function call.
+    print(math::double(21));
+
+    // Qualified global read.
+    print(math::g_pi);
+
+    // Qualified global write.
+    math::g_pi = 628;
+    print(math::g_pi);
+
+    // Qualified struct type + qualified function returning it.
+    v := math::Vec { x: 2, y: 3 };
+    w := math::Vec { x: 10, y: 20 };
+    s := math::add(v, w);
+    print(s.x);
+    print(s.y);
+
+    // Qualified struct passed to a function.
+    print(math::double(s.x));
+
+    // A module may also import other modules; see tests for chains.
+}

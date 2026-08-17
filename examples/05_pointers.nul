@@ -1,0 +1,78 @@
+// ------------------------------------------------------------------
+// 05_pointers.nul — Pointers, address-of, dereference, null.
+//
+//   &x        address of a variable       (type `T^`)
+//   ^p        dereference a pointer       (read or write)
+//   p : T^    declare a pointer variable
+//   null      the null pointer literal
+//
+// Pointers print as lowercase hex with a 0x prefix (null = 0x0).
+// Multi-level pointers (T^^) are supported. type_of() reports the
+// pointed-at type, type_id() gives a numeric id.
+// ------------------------------------------------------------------
+
+fn main()
+{
+    // Take the address of a variable and print it (hex).
+    v := 123;
+    p := &v;
+    print(p);
+
+    // Dereference to read.
+    print(^p);
+
+    // Dereference to write: modifies the pointee.
+    ^p = 456;
+    print(v);
+    print(^p);
+
+    // Two pointers can share the same pointee.
+    q := &v;
+    ^q = 789;
+    print(v);
+
+    // Pointer arithmetic is manual via casts and structs, but a
+    // pointer to a pointer (T^^) dereferences like any other.
+    r := &p;
+    print(^r);   // prints the value of p (an address)
+    print(^(^r));  // prints the pointee of p: v
+    ^(^r) = 111;
+    print(v);
+
+    // Null pointers: declare with explicit type, compare with null.
+    n : i64^ = null;
+    print(n);
+    print(n == null);
+
+    // "Not equal" also has a direct operator.
+    print(n != null);   // false -> n IS null
+    print(p != null);   // true  -> p is not null
+
+    // You may not dereference null; it is a runtime crash. Guard first.
+    if p == null { print("p is null\n"); } else { print("p is not null\n"); }
+
+    // Pointers to different pointee types are distinct types, and the
+    // type system keeps track of what a pointer points to.
+    b := 9 as u8;
+    pb := &b;
+    print(pb);      // 0x...
+    print(^pb);     // 9
+
+    // type_of() prints the pointee type; type_id() a number.
+    print(type_of(p));    // i64^
+    print(type_of(^p));   // i64
+    print(type_id(p) == type_id(^p));
+
+    // A pointer to a pointer still has an address.
+    print(&r);
+    print(&r == null);
+
+    // Pointers to locals keep working across statements; pointer
+    // copies share the same target.
+    a := 1;
+    b2 := &a;
+    c2 := b2;
+    ^c2 = 99;
+    print(a);
+    print(^b2);
+}

@@ -1,0 +1,27 @@
+// ------------------------------------------------------------------
+// 09_module_basics/00_math.nul — the `math` module.
+//
+// A file that starts with `module math` declares that every function,
+// struct and global defined here lives in the `math` namespace.
+// Outside this file, its symbols are referenced as `math::name`.
+// ------------------------------------------------------------------
+
+module math
+
+g_pi : i64 = 314
+
+struct Vec
+{
+    x : i64,
+    y : i64,
+}
+
+fn double(x : i64) -> i64
+{
+    return x * 2;
+}
+
+fn add(v : Vec, w : Vec) -> Vec
+{
+    return Vec { x: v.x + w.x, y: v.y + w.y };
+}

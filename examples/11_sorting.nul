@@ -1,0 +1,107 @@
+// ------------------------------------------------------------------
+// 11_sorting.nul — an advanced program: bubble sort over a fixed list.
+//
+// There are no arrays in Nul, so a "list" is a struct of i64 fields.
+// Struct parameters are passed BY REFERENCE, so a function can read
+// and write the caller's struct freely — bubble_sort() sorts in place.
+//
+// Demonstrates: structs, reference-semantics params, pointer-to-struct
+// member access (`p.x` reads through a `List^`), functions with
+// returns, for loops, if/elif/else, globals, and casts.
+// ------------------------------------------------------------------
+
+struct List
+{
+    n : i64,
+    v0 : i64,
+    v1 : i64,
+    v2 : i64,
+    v3 : i64,
+    v4 : i64,
+    v5 : i64,
+    v6 : i64,
+}
+
+// The next example uses the same "indexed access" trick: since there
+// are no arrays, an index is resolved by an if/elif chain into one of
+// the fixed fields. (Only compile-time-indexable here.)
+fn get(l : List, i : i64) -> i64
+{
+    if i == 0 { return l.v0; }
+    elif i == 1 { return l.v1; }
+    elif i == 2 { return l.v2; }
+    elif i == 3 { return l.v3; }
+    elif i == 4 { return l.v4; }
+    elif i == 5 { return l.v5; }
+    elif i == 6 { return l.v6; }
+    return 0 - 1;
+}
+
+fn set(l : List, i : i64, value : i64)
+{
+    if i == 0 { l.v0 = value; }
+    elif i == 1 { l.v1 = value; }
+    elif i == 2 { l.v2 = value; }
+    elif i == 3 { l.v3 = value; }
+    elif i == 4 { l.v4 = value; }
+    elif i == 5 { l.v5 = value; }
+    elif i == 6 { l.v6 = value; }
+}
+
+// Bubble sort, in place (the struct param aliases the caller's list).
+fn bubble_sort(l : List, count : i64)
+{
+    for i := 0 .. count {
+        for j := 0 .. count - i - 1 {
+            if get(l, j) > get(l, j + 1) {
+                temp := get(l, j);
+                set(l, j, get(l, j + 1));
+                set(l, j + 1, temp);
+            }
+        }
+    }
+}
+
+// A function taking a pointer to the struct and mutating through it.
+fn set_first(l : List^, value : i64)
+{
+    l.v0 = value;
+}
+
+// A global struct: mutable state shared by every function.
+g_data := List { n: 7, v0: 5, v1: 3, v2: 9, v3: 1, v4: 7, v5: 2, v6: 6 };
+
+fn print_list(l : List, count : i64)
+{
+    for i := 0 .. count {
+        print(get(l, i));
+    }
+    print("\n");
+}
+
+fn main()
+{
+    print("before: ");
+    print_list(g_data, 7);
+
+    // Pass by reference (param type `List`): the sort mutates g_data.
+    bubble_sort(g_data, 7);
+
+    print("after:  ");
+    print_list(g_data, 7);
+
+    // Take its address: a `List^` pointer with member access.
+    p := &g_data;
+    print("first is ");
+    print(p.v0);
+    print("\n");
+
+    set_first(&g_data, 42);
+    print("after set_first: ");
+    print_list(g_data, 7);
+
+    // Global struct read from inside a function.
+    print("sorted sum of first two: ");
+    print(g_data.v0 + g_data.v1);
+    print("\n");
+}

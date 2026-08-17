@@ -1,0 +1,29 @@
+// ------------------------------------------------------------------
+// 01_hello.nul — Hello World: the simplest possible Nul program.
+//
+// Run it with:
+//   ./nulc examples/01_hello.nul
+// (the output binary appears next to the source as `01_hello`)
+//
+// `print` writes a value to stdout. Integers and booleans get a
+// trailing newline; strings are printed verbatim (no newline added),
+// so put "\n" in a string literal when you want a line break.
+// ------------------------------------------------------------------
+
+fn main()
+{
+    // A string literal.
+    print("Hello, world!\n");
+
+    // Integer literals.
+    print(42);
+
+    // Booleans.
+    print(true);
+    print(false);
+
+    // A string escape: \" for a quote, \n for a newline, \\ for a backslash.
+    print("Say \"hi\"\n");
+
+    // Comments are // to end of line (this is one).
+}

@@ -1,0 +1,125 @@
+// ------------------------------------------------------------------
+// 04_functions.nul — Functions, parameters, return values, recursion.
+//
+// `fn name(p : T, ...) -> RetType { ... }`
+// A function without `-> Type` infers its return type from the body's
+// `return` statements (a bare `return;` or no return makes it void).
+// Parameters are passed by value; struct parameters have reference
+// semantics (callee mutations are visible to the caller).
+// Functions may be called before their definition and may be recursive.
+// ------------------------------------------------------------------
+
+// No return type: inferred from the `return` statements.
+fn add(a : i64, b : i64)
+{
+    return a + b;
+}
+
+// Explicit return type.
+fn multiply(a : i64, b : i64) -> i64
+{
+    return a * b;
+}
+
+// Void function (explicit `-> void` or just no returns).
+fn greet(name : str) -> void
+{
+    print("Hello, ");
+    print(name);
+    print("!\n");
+}
+
+// Multiple parameters of mixed types.
+fn describe(age : i64, name : str, ok : bool) -> str
+{
+    if ok {
+        return name;
+    }
+    return "anonymous";
+}
+
+// Early return.
+fn first_even(n : i64) -> i64
+{
+    for i := 0 .. n {
+        if i % 2 == 0 {
+            return i;
+        }
+    }
+    return 0 - 1;
+}
+
+// Recursion: factorial.
+fn fact(n : i64) -> i64
+{
+    if n <= 1 {
+        return 1;
+    }
+    return n * fact(n - 1);
+}
+
+// Recursion: fibonacci.
+fn fib(n : i64) -> i64
+{
+    if n < 2 {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+
+// Mutual recursion (is_even <-> is_odd).
+fn is_odd(n : i64) -> bool
+{
+    if n == 0 {
+        return false;
+    }
+    return is_even(n - 1);
+}
+
+fn is_even(n : i64) -> bool
+{
+    if n == 0 {
+        return true;
+    }
+    return is_odd(n - 1);
+}
+
+fn main()
+{
+    // Calling functions, using results in expressions.
+    print(add(2, 3));
+    print(multiply(6, 7));
+    print(add(add(1, 2), add(3, 4)));
+
+    greet("world");
+
+    // Function results as arguments.
+    print(multiply(add(2, 3), add(4, 5)));
+
+    // Return values in conditions.
+    if add(1, 1) == 2 {
+        print("math works\n");
+    }
+
+    // String return value.
+    print(describe(25, "nul", true));
+    print("\n");
+
+    // Early return.
+    print(first_even(7));
+
+    // Recursion.
+    print(fact(6));   // 720
+    print(fib(10));   // 55
+    print(is_even(10));
+    print(is_odd(10));
+
+    // Function call as a loop bound.
+    for i in 0..add(2, 1) {
+        print(i);
+    }
+    print("---\n");
+
+    // Void function result is discarded when unused.
+    greet("again");
+}

@@ -1,0 +1,25 @@
+# Build intermediates
+.build/
+*.obj
+*.o
+*.d
+
+# Compiled binaries
+build
+nulc
+nulc_gui
+build.exe
+nulc.exe
+nulc.pdb
+a.exe
+a.exe.old
+test
+
+# Compiler-generated output (nasm asm + linked binaries)
+*.asm
+out
+out.asm
+out.obj
+
+# Scratch / notes
+later.txt

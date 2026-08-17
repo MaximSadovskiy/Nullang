@@ -1,0 +1,117 @@
+// ------------------------------------------------------------------
+// 03_control_flow.nul — if / else / elif and for loops.
+//
+// if/else bodies always use braces { }. Comparison operators:
+// == != < > <= >= . Logical NOT is `!` (e.g. `!done`, `!false`);
+// there is no `&&`/`||`, so combine conditions with nested ifs.
+// ------------------------------------------------------------------
+
+fn main()
+{
+    // --- if / else -------------------------------------------------
+    x := 10;
+    if x > 5 {
+        print("big\n");
+    } else {
+        print("small\n");
+    }
+
+    // if without else.
+    if x == 10 {
+        print("ten\n");
+    }
+
+    // --- elif chain ------------------------------------------------
+    n := 7;
+    if n == 1 {
+        print("one\n");
+    } elif n == 2 {
+        print("two\n");
+    } elif n == 3 {
+        print("three\n");
+    } else {
+        print("other\n");
+    }
+
+    // Nested ifs.
+    a := 2;
+    b := 3;
+    if a < b {
+        if a == 2 {
+            print("a is two and smaller\n");
+        }
+    }
+
+    // --- for loops ------------------------------------------------
+    // C-style `for i := start .. end` is exclusive of end.
+    for i := 0 .. 3 {
+        print(i);
+    }
+    print("---\n");
+
+    // `..=` is inclusive of the end.
+    for j := 1 ..= 3 {
+        print(j);
+    }
+    print("---\n");
+
+    // `for x in range` is the same but with an implicit counter
+    // variable (also supports `..` and `..=`).
+    for k in 0..4 {
+        print(k);
+    }
+    print("---\n");
+
+    // Loops can use variables / expressions / function calls as bounds
+    // (the bound is evaluated once).
+    limit := 3;
+    for i in 0..limit {
+        print(i * 2);
+    }
+    print("---\n");
+
+    // Accumulating in a loop.
+    sum := 0;
+    for i := 0 .. 5 {
+        sum = sum + i;
+    }
+    print(sum);
+    print("---\n");
+
+    // Nested loops.
+    for r in 0..2 {
+        for c in 0..2 {
+            print(r * 10 + c);
+        }
+    }
+    print("---\n");
+
+    // if/else inside a loop.
+    for i in 0..6 {
+        if i % 2 == 0 {
+            print("even ");
+        } else {
+            print("odd ");
+        }
+    }
+    print("\n");
+
+    // --- condition loops and `!` --------------------------------
+    // `for <cond> { }` (or `for (<cond>) { }`) runs while the
+    // condition holds. `break` exits the loop, `continue` skips to
+    // the next iteration.
+    i := 0;
+    for (i < 3) {
+        i = i + 1;
+        if i == 2 { continue; }
+        print(i);
+    }
+    print("---\n");
+
+    // `for true { }` is an infinite loop; exit it with `break`.
+    for true {
+        print("loop");
+        break;
+    }
+    print("\n");
+}

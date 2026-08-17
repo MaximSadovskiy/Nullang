@@ -1,0 +1,116 @@
+// ------------------------------------------------------------------
+// 06_structs.nul — Structs: user-defined composite types.
+//
+//   struct Name
+//   {
+//       field : Type,
+//       ...
+//   }
+//
+// Initialization: `Name { f1: v1, f2: v2 }` (named) or `Name { 0 }`
+// (zero-fill). Omitted named fields are zero-initialized.
+// Struct values are passed BY REFERENCE to functions: mutations made
+// inside the callee are visible to the caller. Fields accessed with `.`
+// (chained access like `a.b.c` is not supported).
+// ------------------------------------------------------------------
+
+struct Point
+{
+    x : i64,
+    y : i64,
+}
+
+struct Person
+{
+    name : str,
+    age : i64,
+    height : i64,
+    married : bool,
+}
+
+// A struct containing another struct.
+struct Line
+{
+    start : Point,
+    end : Point,
+}
+
+// Struct parameters have reference semantics: mutations persist.
+fn move_x(p : Point, dx : i64)
+{
+    p.x = p.x + dx;
+}
+
+fn read_x(p : Point) -> i64
+{
+    return p.x;
+}
+
+fn main()
+{
+    // Named initialization.
+    origin := Point { x: 0, y: 0 };
+    print(origin.x);
+    print(origin.y);
+
+    // Struct literals as arguments (member access on a literal is not
+    // supported, so bind it first).
+    one := Point { x: 3, y: 4 };
+    print(one.x);
+
+    // Zero initialization.
+    empty := Point { 0 };
+    print(empty.x);
+    print(empty.y);
+
+    // Partial init: the rest is zero-filled.
+    p := Point { x: 7 };
+    print(p.x);
+    print(p.y);
+
+    // Field reads and writes.
+    p.x = 100;
+    print(p.x);
+    print(p.y);
+
+    // Bigger struct with mixed types.
+    alice := Person { name: "alice", age: 30, height: 165, married: true };
+    print(alice.name);
+    print(alice.age);
+    print(alice.married);
+
+    // Defaults: omitted fields are zero.
+    bob := Person { name: "bob" };
+    print(bob.age);
+    print(bob.married);
+
+    // Nested structs: initialize inner ones inline or with locals.
+    // (Chained member access like `l.start.x` is not supported, so
+    // read the nested struct into a variable first.)
+    l := Line { start: Point { x: 1, y: 2 }, end: Point { x: 3, y: 4 } };
+    s := l.start;
+    e := l.end;
+    print(s.x);
+    print(s.y);
+    print(e.x);
+    print(e.y);
+
+    // Struct values are passed by reference: mutating inside a function
+    // changes the caller's copy.
+    pt := Point { x: 5, y: 5 };
+    move_x(pt, 10);
+    print(pt.x);   // 15, the mutation stuck
+
+    print(read_x(pt));
+
+    // Pointers to structs: dereference for member access.
+    pp := &pt;
+    print(pp.x);
+    pp.x = 50;
+    print(pt.x);
+
+    // Zero-init with `{ 0 }` is the common "make a blank one" idiom.
+    blank := Person { 0 };
+    print(blank.height);
+    print(blank.married);
+}
