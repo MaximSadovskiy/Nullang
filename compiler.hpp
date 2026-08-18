@@ -863,7 +863,7 @@ public:
                 }
                 auto type = operators_array[oper_index-1].type;
                 _tokens.push(Token{type, source_view.sub_view(mark, get_index())});
-            } else if (ch == '\n' || ch == '\r' || ch == ' ') {
+            } else if (ch == '\n' || ch == '\r' || ch == '\t' || ch == ' ') {
                 // xd
             } else {
                 auto tok = Token{Tok_Eof, source_view.sub_view(mark, get_index())};
