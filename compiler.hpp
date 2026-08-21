@@ -53,6 +53,7 @@ enum TokenType {
     Tok_RBracket,
     Tok_LSquare,
     Tok_RSquare,
+    Tok_Directive,
     Tok_Eof,
 };
 
@@ -89,6 +90,7 @@ enum ExpressionType {
     Expr_ArrayLit,
     Expr_Index,
     Expr_IndexAssign,
+    Expr_Assert,
 };
 
 enum ValueType
@@ -410,6 +412,14 @@ struct ModuleImportExpr : Expression
 };
 
 struct PrintExpr : Expression
+{
+    Expression* rhs = nullptr;
+};
+
+// `#assert <expr>`: the operand is evaluated entirely at compile time (via
+// the constant-folding translation); a result below 1 is a compile error
+// reported at this token's file and line.
+struct AssertExpr : Expression
 {
     Expression* rhs = nullptr;
 };
@@ -786,6 +796,18 @@ public:
                 // positions (param/return/cast); a standalone `^` is a parse
                 // error later.
                 _tokens.push(Token{Tok_Caret, source_view.sub_view(mark, get_index())});
+            } else if (ch == '#') {
+                // Compile-time directive: the whole `#name` lexes as one
+                // token. Only the built-in directives are recognized; an
+                // unknown name is rejected here so typos fail loudly instead
+                // of parsing as code.
+                while (is_word(peak_char()))
+                    skip_char();
+                auto directive = source_view.sub_view(mark, get_index());
+                if (directive != "#assert" && directive != "#type_id"
+                    && directive != "#type_size" && directive != "#type_of")
+                    compiler_error(Token{Tok_Directive, directive}, "Unknown compile-time directive '" SV_FORMAT "', expected '#assert', '#type_id', '#type_size' or '#type_of'\n", SV_ARG(directive));
+                _tokens.push(Token{Tok_Directive, directive});
             } else if (ch == '[') {
                 // Array literal (`[1, 2, 3]`) and postfix indexing (`arr[i]`).
                 _tokens.push(Token{Tok_LSquare, source_view.sub_view(mark, get_index())});
@@ -924,6 +946,11 @@ struct DeclaredFunction
     // The module this function is declared in ("" = the global module). Used
     // for visibility checks and to mangle the emitted label.
     StrView module_name = "";
+    // Source file the function was parsed from. Translation runs after every
+    // file is parsed, so compiler_error's file/line attribution must be
+    // pointed back at this file while the body translates.
+    StrView src_path = SV_LIT("");
+    const char* src_content = "";
     bool operator==(const DeclaredFunction& other) const {
         return name == other.name;
     }
@@ -1340,13 +1367,13 @@ static bool phys_callee_saved(int p) {
     return p == PR_R12 || p == PR_R13 || p == PR_R14 || p == PR_R15;
 }
 
-// Function names the user may not redefine: the reserved entry point and the
-// built-in reflection functions are real ident tokens that would otherwise be
+// Function names the user may not redefine: the reserved entry point and
+// remaining built-ins are real ident tokens that would otherwise be
 // shadowable; the language keywords can never reach here (parse_function
-// requires Tok_Ident) but are listed as defense in depth.
+// requires Tok_Ident) but are listed as defense in depth. The reflection
+// builtins need no reservation: they lex as `#`-directives now.
 static StrView forbidden_function_names[] = {
     "__entry",
-    "type_id", "type_size", "type_of",
     "offset_of", "align_of",
     "true", "false", "print",
     "i8", "i16", "i32", "i64",
@@ -1921,6 +1948,7 @@ const char* tok_type_to_str(enum TokenType type) {
         case Tok_Div: return "Div";
         case Tok_Mod: return "Mod";
         case Tok_Ampersand: return "Ampersand";
+        case Tok_Directive: return "Directive";
 
         case Tok_Eof: return "Eof";
 
@@ -1955,6 +1983,7 @@ const char* expr_type_to_str(ExpressionType type) {
         case Expr_ArrayLit: return "ArrayLit";
         case Expr_Index: return "Index";
         case Expr_IndexAssign: return "IndexAssign";
+        case Expr_Assert: return "Assert";
 
         default: UNREACHABLE("expr_type_to_str");
     }
@@ -2444,6 +2473,41 @@ Expression* parse_type(Token tok) {
 }
 Expression* parse_keyword(Lexer& lexer) {
     Token tok = lexer.next();
+    if (tok.type == Tok_Directive) {
+        if (tok.val == "#assert") {
+            // `#assert <expr>`: parsed like any expression; evaluation and the
+            // pass/fail check happen during translation, which reports this
+            // token's file and line on failure.
+            auto* assert_expr = new_expr<AssertExpr>(tok, Expr_Assert);
+            assert_expr->rhs = parse_expression(lexer);
+            ASSERT_NOT_NULL(assert_expr->rhs);
+            skip_semicolon_if_exist(lexer);
+            return assert_expr;
+        }
+        // `#type_id(expr)` / `#type_size(expr)` / `#type_of(expr)`: the
+        // reflection builtins. They lex as directives (so they can never be
+        // shadowed by user functions) but translate through the ordinary
+        // builtin-call path, so they reuse its argument checking.
+        auto open = lexer.next();
+        if (open.type != Tok_LParen)
+            compiler_error(open, "Expected '(' after '" SV_FORMAT "', got '" SV_FORMAT "'\n", SV_ARG(tok.val), SV_ARG(open.val));
+        auto* call = new_call_expr(tok);
+        auto close = lexer.peak();
+        if (close.type != Tok_RParen) {
+            do {
+                Expression* inner = parse_expression(lexer);
+                if (!inner) break;
+                call->args.push(CallArg{inner});
+                close = lexer.next();
+            } while (close.type == Tok_Comma);
+        } else {
+            lexer.next();
+            return call;
+        }
+        if (close.type != Tok_RParen)
+            compiler_error(close, "Expected ')', got '" SV_FORMAT "'\n", SV_ARG(close.val));
+        return call;
+    }
     if (tok.type == Tok_Return) {
         // Bare `return;` / `return }` (no value) is a void return.
         auto peek = lexer.peak();
@@ -3242,6 +3306,11 @@ Expression* parse_primary(Lexer& lexer) {
         auto* module_import_expr = new_module_import_expr(module_name, module_name.val);
         ASSERT_NOT_NULL(module_import_expr);
         return module_import_expr;
+    } else if (next_tok.type == Tok_Directive) {
+        // Top-level `#assert` (the reflection directives only appear inside
+        // expressions): routed through the keyword parser like the statement
+        // forms; translation checks it at compile time.
+        return parse_keyword(lexer);
     } else if (next_tok.type == Tok_Ident) {
         lexer.skip();
         auto oper = lexer.peak();
@@ -3300,12 +3369,12 @@ Expression* parse_expression(Lexer& lexer, Expression* lhs, int min_prec, bool a
        // The same applies to other statement-level constructs (if/for/return/
        // function/struct/block), whose leading `^`/`&` must start a fresh
        // statement instead of being chained as an operator.
-       if (lhs->type == Expr_Assignment || lhs->type == Expr_If
-           || lhs->type == Expr_For || lhs->type == Expr_Return
-           || lhs->type == Expr_Break || lhs->type == Expr_Continue
-           || lhs->type == Expr_Function || lhs->type == Expr_Struct
-           || lhs->type == Expr_Block)
-           break;
+        if (lhs->type == Expr_Assignment || lhs->type == Expr_If
+            || lhs->type == Expr_For || lhs->type == Expr_Return
+            || lhs->type == Expr_Break || lhs->type == Expr_Continue
+            || lhs->type == Expr_Function || lhs->type == Expr_Struct
+            || lhs->type == Expr_Block || lhs->type == Expr_Assert)
+            break;
 
        lexer.next();
        Expression* rhs = parse_expression(lexer, nullptr, prec(op_index) + 1, allow_assignment);
@@ -3461,6 +3530,10 @@ void add_function_or_report_if_exit(FunctionExpr* expr)
     g_functions.push(DeclaredFunction{expr->tok.val, expr, {}, {}, expr->return_type, expr->return_struct_name, expr->return_struct_module, expr->return_pointee, expr->return_ptr_depth, expr->return_pointee_struct_name, expr->return_pointee_struct_module});
     g_functions.last().is_extern = expr->is_extern;
     g_functions.last().module_name = g_current_module_name;
+    // Remember the declaring file so errors during body translation (which
+    // runs after all files are parsed) report the right file and line.
+    g_functions.last().src_path = src_path;
+    g_functions.last().src_content = src_content;
 
     // `main` is special: __entry forwards the OS command line to it, so its
     // signature is constrained to `(argc : i64)` and/or `(argc : i64,
@@ -7108,6 +7181,14 @@ void translate_function_body(DeclaredFunction& fun)
     StrView prev_module = g_current_module_name;
     g_current_module_name = fun.module_name;
 
+    // Error attribution likewise: point compiler_error back at the file the
+    // function was parsed from (translation runs after every file is parsed,
+    // so the globals would otherwise name whichever file was parsed last).
+    StrView prev_src_path = src_path;
+    const char* prev_src_content = src_content;
+    src_path = fun.src_path;
+    src_content = fun.src_content;
+
     // Declared return type (`fn f() -> type`), or TYPE_NOP when none is
     // written: the type is then *inferred* from the body's `return` statements
     // (the first `return` fixes it; a bare `return;` or no return at all makes
@@ -7251,6 +7332,8 @@ void translate_function_body(DeclaredFunction& fun)
     g_live_function_return_type = prev_live;
     g_translating_functions.pop();
     g_current_module_name = prev_module;
+    src_path = prev_src_path;
+    src_content = prev_src_content;
 }
 
 // Array metadata (element type and fixed length) of the *value* produced by
@@ -7867,8 +7950,8 @@ VirtualReg translate_to_instruction(Array<Instruction>& ops, Array<VirtualReg>& 
             }
             else if (operation == Tok_Type) {
                 // A standalone type name is a compile-time constant equal to
-                // its type id and typed as that type, so `type_id(i32)`,
-                // `type_size(i32)`, `type_of(i32)` and `type_id(x) == i32`
+                // its type id and typed as that type, so `#type_id(i32)`,
+                // `#type_size(i32)`, `#type_of(i32)` and `#type_id(x) == i32`
                 // all work. The `as` cast path reads only rhs_type and is
                 // unaffected by the constant register produced here.
                 ValueType type = str_to_value_type(bin_expr->tok.val);
@@ -8181,6 +8264,25 @@ VirtualReg translate_to_instruction(Array<Instruction>& ops, Array<VirtualReg>& 
             return_type = TYPE_VOID;
             Variable var = {print_expr->rhs->tok.val, rhs_type};
             ops.push(Instruction{.type = OP_PRINT, .location = print_expr->tok, .target = {var}, .reg_index = rhs.index});
+        } break;
+
+        case Expr_Assert: {
+            auto* assert_expr = dynamic_cast<AssertExpr*>(expr);
+            ASSERT_NOT_NULL(assert_expr);
+            // `#assert <expr>`: translate the operand into this scratch
+            // context; constant folding leaves a compile-time register whose
+            // value decides the check. Nothing is emitted into `ops`.
+            ValueType value_type = TYPE_NOP;
+            auto value = translate_to_instruction(ops, regs, local_vars, assert_expr->rhs, value_type);
+            if (value_type != TYPE_BOOL && !is_numeric_type(value_type))
+                compiler_error(assert_expr->rhs->tok, "#assert expression must be of a numeric or bool type, got %s\n", value_type_to_str(value_type));
+            if (!value.is_comp_time)
+                compiler_error(assert_expr->rhs->tok, "#assert expression must be a compile-time constant\n");
+            const bool failed = value_type == TYPE_U64
+                ? (u64)value.int_val < 1
+                : value.int_val < 1;
+            if (failed)
+                compiler_error(assert_expr->tok, "#assert failed: expression evaluated to %lld\n", (long long)value.int_val);
         } break;
 
         case Expr_AddressOf: {
@@ -8646,18 +8748,18 @@ VirtualReg translate_to_instruction(Array<Instruction>& ops, Array<VirtualReg>& 
                 }
                 compiler_error(field_tok, "Struct '" SV_FORMAT "' has no field named '" SV_FORMAT "'\n", SV_ARG(struct_name), SV_ARG(field_tok.val));
             }
-            if (call_expr->tok.val == "type_id" || call_expr->tok.val == "type_size"
-                || call_expr->tok.val == "type_of") {
+            if (call_expr->tok.val == "#type_id" || call_expr->tok.val == "#type_size"
+                || call_expr->tok.val == "#type_of") {
                 if (call_expr->args.count() != 1) {
                     compiler_error(call_expr->tok, "Builtin '" SV_FORMAT "' expects exactly 1 argument\n", SV_ARG(call_expr->tok.val));
                 }
                 ValueType arg_type = TYPE_NOP;
                 translate_to_instruction(ops, regs, local_vars, call_expr->args[0].expr, arg_type);
-                if (call_expr->tok.val == "type_id") {
+                if (call_expr->tok.val == "#type_id") {
                     return_type = TYPE_I64;
                     return make_const(regs, TYPE_I64, (s64)arg_type);
                 }
-                if (call_expr->tok.val == "type_size") {
+                if (call_expr->tok.val == "#type_size") {
                     return_type = TYPE_I64;
                     return make_const(regs, TYPE_I64, (s64)type_size(arg_type));
                 }

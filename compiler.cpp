@@ -1292,6 +1292,11 @@ static int compile_nul_files(Array<Sources>& sources, StrView out_file) {
     // module declaration is known.
     Array<StrView> file_modules{};
     Array<usize> file_expr_start{};
+    // Per-file error-attribution context: translation (pass 2) runs after all
+    // files are parsed, so src_path/src_content must be restored per file or
+    // errors would name whichever file was parsed last.
+    Array<StrView> file_paths{};
+    Array<const char*> file_contents{};
     for (auto& src : sources) {
         log_info("Compiling " SV_FORMAT "\n", SV_ARG(src.src));
         if (src.parsed) continue;
@@ -1320,6 +1325,8 @@ static int compile_nul_files(Array<Sources>& sources, StrView out_file) {
             src_b.append(src.src).append_null(false);
             src_path = src_b.to_string_view(true);
         }
+        file_paths.push(src_path);
+        file_contents.push(src_content);
 
         if (!lexer->tokenize()) { delete lexer; return 1; }
         if (lexer->_tokens.is_empty()) { delete lexer; continue; }
@@ -1354,6 +1361,8 @@ static int compile_nul_files(Array<Sources>& sources, StrView out_file) {
         while (file_idx + 1 < file_expr_start.count() && i >= file_expr_start[file_idx + 1])
             ++file_idx;
         g_current_module_name = file_modules[file_idx];
+        src_path = file_paths[file_idx];
+        src_content = file_contents[file_idx];
         ValueType return_type = TYPE_NOP;
         translate_to_instruction(ops, regs, vars, all_exprs[i], return_type);
     }

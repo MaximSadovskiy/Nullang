@@ -531,7 +531,7 @@ static void positive_tests() {
     check("str data assign", "fn main()\n{\n    s := \"hello\";\n    p := s.data;\n    print(p != null);\n}\n", "true\n");
     check("str data deref read", "fn main()\n{\n    s := \"hello\";\n    d := s.data;\n    print(^d);\n}\n", "104\n");
     check("str data deref write", "fn main()\n{\n    s := \"abc\";\n    d := s.data;\n    ^d = 90;\n    print(^d);\n}\n", "90\n");
-    check("str data type", "fn main()\n{\n    s := \"hello\";\n    d := s.data;\n    print(type_of(d));\n}\n", "u8^");
+    check("str data type", "fn main()\n{\n    s := \"hello\";\n    d := s.data;\n    print(#type_of(d));\n}\n", "u8^");
     check_error("str len of non-literal", "fn getstr() -> str\n{\n    return \"abc\";\n}\nfn main()\n{\n    s := getstr();\n    print(s.len);\n}\n", "Cannot take 'len' of a string whose value is not a literal");
     check_error("str unknown member", "fn main()\n{\n    s := \"hello\";\n    print(s.size);\n}\n", "String type has no member");
 
@@ -782,64 +782,64 @@ static void positive_tests() {
     check("cast bool to u8 rt", "fn main()\n{\n    x := 3 < 5;\n    print(x as u8);\n}\n", "1\n");
     check("cast u32 to i32 rt", "fn main()\n{\n    x := 3000000000 as u32;\n    print(x as i32);\n}\n", "-1294967296\n");
 
-    // --- type builtins (type_id / type_size / type_of) --------------------
-    // type_id returns the ValueType enum value: i8=3 i16=4 i32=5 i64=6
-    // bool=2 string=8; type_size returns logical bytes (bool=1, str/ptr=8);
-    // type_of returns the type name string.
-    check("type_id int literal", "fn main()\n{\n    print(type_id(5));\n}\n", "6\n");
-    check("type_id int var", "fn main()\n{\n    x := 5;\n    print(type_id(x));\n}\n", "6\n");
-    check("type_id bool", "fn main()\n{\n    print(type_id(true));\n}\n", "2\n");
-    check("type_id string", "fn main()\n{\n    print(type_id(\"abc\"));\n}\n", "12\n");
-    check("type_id cast", "fn main()\n{\n    print(type_id(5 as i8));\n    print(type_id(5 as i16));\n    print(type_id(5 as i32));\n}\n", "3\n4\n5\n");
-    check("type_id unsigned", "fn main()\n{\n    print(type_id(5 as u8));\n    print(type_id(5 as u16));\n    print(type_id(5 as u32));\n    print(type_id(5 as u64));\n}\n", "7\n8\n9\n10\n");
-    check("type_id string var", "fn main()\n{\n    x := \"hi\";\n    print(type_id(x));\n}\n", "12\n");
-    check("type_size i8", "fn main()\n{\n    print(type_size(1 as i8));\n}\n", "1\n");
-    check("type_size i16", "fn main()\n{\n    print(type_size(1 as i16));\n}\n", "2\n");
-    check("type_size i32", "fn main()\n{\n    print(type_size(1 as i32));\n}\n", "4\n");
-    check("type_size i64", "fn main()\n{\n    print(type_size(5));\n}\n", "8\n");
-    check("type_size bool", "fn main()\n{\n    print(type_size(true));\n}\n", "1\n");
-    check("type_size bool var", "fn main()\n{\n    b := 3 < 5;\n    print(type_size(b));\n}\n", "1\n");
-    check("type_size bool cast", "fn main()\n{\n    print(type_size(5 as bool));\n}\n", "1\n");
-    check("type_size string", "fn main()\n{\n    print(type_size(\"abc\"));\n}\n", "8\n");
-    check("type_of int", "fn main()\n{\n    print(type_of(5));\n}\n", "i64");
-    check("type_of i8", "fn main()\n{\n    print(type_of(5 as i8));\n}\n", "i8");
-    check("type_of i16", "fn main()\n{\n    print(type_of(5 as i16));\n}\n", "i16");
-    check("type_of bool", "fn main()\n{\n    print(type_of(true));\n}\n", "bool");
-    check("type_of string", "fn main()\n{\n    print(type_of(\"abc\"));\n}\n", "string");
-    check("type_of var", "fn main()\n{\n    x := 42;\n    print(type_of(x));\n}\n", "i64");
-    check("type_of string var", "fn main()\n{\n    x := \"hi\";\n    print(type_of(x));\n}\n", "string");
-    check("type builtins chained", "fn main()\n{\n    print(type_id(5 as i32));\n    print(type_size(5 as i8));\n    print(type_of(5 as i16));\n}\n", "5\n1\ni16");
-    check("type_size unsigned", "fn main()\n{\n    print(type_size(5 as u8));\n    print(type_size(5 as u16));\n    print(type_size(5 as u32));\n    print(type_size(5 as u64));\n}\n", "1\n2\n4\n8\n");
-    check("type_of unsigned", "fn main()\n{\n    print(type_of(5 as u8));\n    print(type_of(5 as u16));\n    print(type_of(5 as u32));\n    print(type_of(5 as u64));\n}\n", "u8u16u32u64");
-    check("type_of pointer", "fn main()\n{\n    x := 5;\n    p := &x;\n    q := &p;\n    print(type_of(&x));\n    print(type_of(p));\n    print(type_of(q));\n    print(type_of(&q));\n}\n", "i64^i64^i64^^i64^^^");
-    check("type_of pointer param", "fn paramType(p : i64^^) -> i64\n{\n    print(type_of(p));\n    return 0;\n}\nfn main()\n{\n    x := 5;\n    p := &x;\n    paramType(&p);\n}\n", "i64^^");
+    // --- type builtins (#type_id / #type_size / #type_of) ------------------
+    // #type_id returns the ValueType enum value: i8=3 i16=4 i32=5 i64=6
+    // bool=2 string=8; #type_size returns logical bytes (bool=1, str/ptr=8);
+    // #type_of returns the type name string.
+    check("type_id int literal", "fn main()\n{\n    print(#type_id(5));\n}\n", "6\n");
+    check("type_id int var", "fn main()\n{\n    x := 5;\n    print(#type_id(x));\n}\n", "6\n");
+    check("type_id bool", "fn main()\n{\n    print(#type_id(true));\n}\n", "2\n");
+    check("type_id string", "fn main()\n{\n    print(#type_id(\"abc\"));\n}\n", "12\n");
+    check("type_id cast", "fn main()\n{\n    print(#type_id(5 as i8));\n    print(#type_id(5 as i16));\n    print(#type_id(5 as i32));\n}\n", "3\n4\n5\n");
+    check("type_id unsigned", "fn main()\n{\n    print(#type_id(5 as u8));\n    print(#type_id(5 as u16));\n    print(#type_id(5 as u32));\n    print(#type_id(5 as u64));\n}\n", "7\n8\n9\n10\n");
+    check("type_id string var", "fn main()\n{\n    x := \"hi\";\n    print(#type_id(x));\n}\n", "12\n");
+    check("type_size i8", "fn main()\n{\n    print(#type_size(1 as i8));\n}\n", "1\n");
+    check("type_size i16", "fn main()\n{\n    print(#type_size(1 as i16));\n}\n", "2\n");
+    check("type_size i32", "fn main()\n{\n    print(#type_size(1 as i32));\n}\n", "4\n");
+    check("type_size i64", "fn main()\n{\n    print(#type_size(5));\n}\n", "8\n");
+    check("type_size bool", "fn main()\n{\n    print(#type_size(true));\n}\n", "1\n");
+    check("type_size bool var", "fn main()\n{\n    b := 3 < 5;\n    print(#type_size(b));\n}\n", "1\n");
+    check("type_size bool cast", "fn main()\n{\n    print(#type_size(5 as bool));\n}\n", "1\n");
+    check("type_size string", "fn main()\n{\n    print(#type_size(\"abc\"));\n}\n", "8\n");
+    check("type_of int", "fn main()\n{\n    print(#type_of(5));\n}\n", "i64");
+    check("type_of i8", "fn main()\n{\n    print(#type_of(5 as i8));\n}\n", "i8");
+    check("type_of i16", "fn main()\n{\n    print(#type_of(5 as i16));\n}\n", "i16");
+    check("type_of bool", "fn main()\n{\n    print(#type_of(true));\n}\n", "bool");
+    check("type_of string", "fn main()\n{\n    print(#type_of(\"abc\"));\n}\n", "string");
+    check("type_of var", "fn main()\n{\n    x := 42;\n    print(#type_of(x));\n}\n", "i64");
+    check("type_of string var", "fn main()\n{\n    x := \"hi\";\n    print(#type_of(x));\n}\n", "string");
+    check("type builtins chained", "fn main()\n{\n    print(#type_id(5 as i32));\n    print(#type_size(5 as i8));\n    print(#type_of(5 as i16));\n}\n", "5\n1\ni16");
+    check("type_size unsigned", "fn main()\n{\n    print(#type_size(5 as u8));\n    print(#type_size(5 as u16));\n    print(#type_size(5 as u32));\n    print(#type_size(5 as u64));\n}\n", "1\n2\n4\n8\n");
+    check("type_of unsigned", "fn main()\n{\n    print(#type_of(5 as u8));\n    print(#type_of(5 as u16));\n    print(#type_of(5 as u32));\n    print(#type_of(5 as u64));\n}\n", "u8u16u32u64");
+    check("type_of pointer", "fn main()\n{\n    x := 5;\n    p := &x;\n    q := &p;\n    print(#type_of(&x));\n    print(#type_of(p));\n    print(#type_of(q));\n    print(#type_of(&q));\n}\n", "i64^i64^i64^^i64^^^");
+    check("type_of pointer param", "fn paramType(p : i64^^) -> i64\n{\n    print(#type_of(p));\n    return 0;\n}\nfn main()\n{\n    x := 5;\n    p := &x;\n    paramType(&p);\n}\n", "i64^^");
     // offset_of reports each field's C byte offset; align_of reports the
     // struct's C alignment (largest member alignment, empty struct -> 1).
     check("offset_of field offsets", "struct H { a : u8, b : u16, c : u32 }\nfn main()\n{\n    print(offset_of(H, \"a\"))\n    print(offset_of(H, \"b\"))\n    print(offset_of(H, \"c\"))\n}\n", "0\n2\n4\n");
     check("align_of struct alignment", "struct W { w : u16, q : i64 }\nstruct E { }\nstruct H { a : u8, b : u16, c : u32 }\nfn main()\n{\n    print(align_of(W))\n    print(align_of(H))\n    print(align_of(E))\n}\n", "8\n4\n1\n");
     check("offset_of align_of compose", "struct H { a : u8, b : u16, c : u32 }\nfn main()\n{\n    print(offset_of(H, \"b\") + align_of(H))\n    print(align_of(H) * 2 + offset_of(H, \"c\"))\n}\n", "6\n12\n");
-    check("type_of pointer result", "fn getPtr(p : i64^) -> i64^\n{\n    return p;\n}\nfn main()\n{\n    x := 5;\n    print(type_of(getPtr(&x)));\n}\n", "i64^");
+    check("type_of pointer result", "fn getPtr(p : i64^) -> i64^\n{\n    return p;\n}\nfn main()\n{\n    x := 5;\n    print(#type_of(getPtr(&x)));\n}\n", "i64^");
 
     // --- type-dependent behavior ------------------------------------------
     // The same value must behave differently depending on its type: narrowing
     // casts truncate, and the reflection builtins report the static type.
     check("type dependent truncation", "fn main()\n{\n    x := 300;\n    print(x);\n    print(x as i8);\n    print(x as i16);\n    print(x as i32);\n    print(x as i64);\n}\n", "300\n44\n300\n300\n300\n");
     check("type dependent bool", "fn main()\n{\n    x := 5;\n    print(x);\n    print(x as bool);\n    print(0 as bool);\n}\n", "5\ntrue\nfalse\n");
-    check("type dependent builtins", "fn main()\n{\n    x := 5;\n    print(type_id(x));\n    print(type_id(x as i8));\n    print(type_size(x));\n    print(type_size(x as i8));\n    print(type_of(x));\n    print(type_of(x as i8));\n}\n", "6\n3\n8\n1\ni64i8");
+    check("type dependent builtins", "fn main()\n{\n    x := 5;\n    print(#type_id(x));\n    print(#type_id(x as i8));\n    print(#type_size(x));\n    print(#type_size(x as i8));\n    print(#type_of(x));\n    print(#type_of(x as i8));\n}\n", "6\n3\n8\n1\ni64i8");
     check("type dependent literal", "fn main()\n{\n    print(300 as i8);\n    print(300 as i16);\n    print(300 as i32);\n    print(300 as i64);\n}\n", "44\n300\n300\n300\n");
 
     // --- type names as values ---------------------------------------------
     // A type name in expression context is a constant equal to its type id,
     // so it can be passed to the reflection builtins and compared directly.
-    check("type name as id", "fn main()\n{\n    print(type_id(i32));\n    print(type_id(i8));\n    print(type_id(bool));\n    print(type_id(string));\n}\n", "5\n3\n2\n12\n");
-    check("type name as size", "fn main()\n{\n    print(type_size(i8));\n    print(type_size(i16));\n    print(type_size(i32));\n    print(type_size(i64));\n}\n", "1\n2\n4\n8\n");
-    check("type name as of", "fn main()\n{\n    print(type_of(i8));\n    print(type_of(string));\n}\n", "i8string");
-    check("unsigned type name as id", "fn main()\n{\n    print(type_id(u8));\n    print(type_id(u16));\n    print(type_id(u32));\n    print(type_id(u64));\n}\n", "7\n8\n9\n10\n");
-    check("unsigned type name as size", "fn main()\n{\n    print(type_size(u8));\n    print(type_size(u16));\n    print(type_size(u32));\n    print(type_size(u64));\n}\n", "1\n2\n4\n8\n");
-    check("unsigned type name compare", "fn main()\n{\n    print(type_id(5 as u8) == u8);\n    print(type_id(5 as u16) == u16);\n    print(type_id(5 as u32) == u32);\n    print(type_id(5 as u64) == u64);\n}\n", "true\ntrue\ntrue\ntrue\n");
-    check("type name compare", "fn main()\n{\n    print(type_id(5) == i64);\n    print(type_id(5 as i8) == i8);\n    print(type_id(true) == type_id(bool));\n    print(type_id(\"hi\") == string);\n    print(type_id(5) == i8);\n}\n", "true\ntrue\ntrue\ntrue\nfalse\n");
-    check("type name conditional", "fn main()\n{\n    x := 5;\n    if (type_id(x) == i32) { print(1); }\n    else { print(2); }\n    if (type_id(x) == i64) { print(3); }\n}\n", "2\n3\n");
-    check("type name in variable", "fn main()\n{\n    t := i16;\n    print(type_id(t) == i16);\n    print(type_size(t));\n}\n", "true\n2\n");
+    check("type name as id", "fn main()\n{\n    print(#type_id(i32));\n    print(#type_id(i8));\n    print(#type_id(bool));\n    print(#type_id(string));\n}\n", "5\n3\n2\n12\n");
+    check("type name as size", "fn main()\n{\n    print(#type_size(i8));\n    print(#type_size(i16));\n    print(#type_size(i32));\n    print(#type_size(i64));\n}\n", "1\n2\n4\n8\n");
+    check("type name as of", "fn main()\n{\n    print(#type_of(i8));\n    print(#type_of(string));\n}\n", "i8string");
+    check("unsigned type name as id", "fn main()\n{\n    print(#type_id(u8));\n    print(#type_id(u16));\n    print(#type_id(u32));\n    print(#type_id(u64));\n}\n", "7\n8\n9\n10\n");
+    check("unsigned type name as size", "fn main()\n{\n    print(#type_size(u8));\n    print(#type_size(u16));\n    print(#type_size(u32));\n    print(#type_size(u64));\n}\n", "1\n2\n4\n8\n");
+    check("unsigned type name compare", "fn main()\n{\n    print(#type_id(5 as u8) == u8);\n    print(#type_id(5 as u16) == u16);\n    print(#type_id(5 as u32) == u32);\n    print(#type_id(5 as u64) == u64);\n}\n", "true\ntrue\ntrue\ntrue\n");
+    check("type name compare", "fn main()\n{\n    print(#type_id(5) == i64);\n    print(#type_id(5 as i8) == i8);\n    print(#type_id(true) == #type_id(bool));\n    print(#type_id(\"hi\") == string);\n    print(#type_id(5) == i8);\n}\n", "true\ntrue\ntrue\ntrue\nfalse\n");
+    check("type name conditional", "fn main()\n{\n    x := 5;\n    if (#type_id(x) == i32) { print(1); }\n    else { print(2); }\n    if (#type_id(x) == i64) { print(3); }\n}\n", "2\n3\n");
+    check("type name in variable", "fn main()\n{\n    t := i16;\n    print(#type_id(t) == i16);\n    print(#type_size(t));\n}\n", "true\n2\n");
 
     // --- variables ------------------------------------------------------
     check("variable create", "fn main()\n{\n    x := 5;\n    print(x);\n}\n", "5\n");
@@ -1076,8 +1076,8 @@ static void positive_tests() {
     check("typed bool param", "fn t(b : bool) -> i64\n{\n    print(b);\n    return 0;\n}\nfn main()\n{\n    t(true);\n    t(false);\n    t(2 < 3);\n}\n", "true\nfalse\ntrue\n");
     check("typed bool param casts", "fn t(b : bool) -> i64\n{\n    print(b as u32);\n    return 0;\n}\nfn main()\n{\n    t(true);\n}\n", "1\n");
     check("typed u32 param unsigned compare", "fn t(a : u32) -> i64\n{\n    print(a > (1000 as u32));\n    return 0;\n}\nfn main()\n{\n    t(5);\n    t(0 - 1);\n}\n", "false\ntrue\n");
-    check("typed param type builtins", "fn t(a : u32) -> i64\n{\n    print(type_id(a));\n    print(type_size(a));\n    print(type_of(a));\n    return 0;\n}\nfn main()\n{\n    t(5);\n}\n", "9\n4\nu32");
-    check("mixed typed params", "fn t(a : u32, b : i64) -> i64\n{\n    print(type_id(a));\n    print(type_id(b));\n    return 0;\n}\nfn main()\n{\n    t(1, 2);\n}\n", "9\n6\n");
+    check("typed param type builtins", "fn t(a : u32) -> i64\n{\n    print(#type_id(a));\n    print(#type_size(a));\n    print(#type_of(a));\n    return 0;\n}\nfn main()\n{\n    t(5);\n}\n", "9\n4\nu32");
+    check("mixed typed params", "fn t(a : u32, b : i64) -> i64\n{\n    print(#type_id(a));\n    print(#type_id(b));\n    return 0;\n}\nfn main()\n{\n    t(1, 2);\n}\n", "9\n6\n");
     check("typed string param", "fn t(s : string) -> i64\n{\n    print(s);\n    return 0;\n}\nfn main()\n{\n    t(\"hello\");\n}\n", "hello");
     check("typed params in user example", "fn test(arg1 : u32, arg2 : bool) -> i64\n{\n    print(arg2);\n    print(arg1 > (1000 as u32));\n    return 0;\n}\nfn main()\n{\n    test(5, true);\n    test(0 - 1, false);\n}\n", "true\nfalse\nfalse\ntrue\n");
 
@@ -1087,9 +1087,9 @@ static void positive_tests() {
     // conversions, like the rest of the language), bool parameters take only
     // bools, and string parameters take only strings. There are no implicit
     // bool<->int conversions.
-    check("typed param accepts any int width", "fn t(a : u8, b : u64) -> i64\n{\n    print(type_id(a));\n    print(type_id(b));\n    return 0;\n}\nfn main()\n{\n    t(1, 2);\n}\n", "7\n10\n");
+    check("typed param accepts any int width", "fn t(a : u8, b : u64) -> i64\n{\n    print(#type_id(a));\n    print(#type_id(b));\n    return 0;\n}\nfn main()\n{\n    t(1, 2);\n}\n", "7\n10\n");
     check("bool arg to bool param", "fn t(b : bool) -> i64\n{\n    print(b);\n    return 0;\n}\nfn main()\n{\n    t(true);\n    t(2 < 3);\n}\n", "true\ntrue\n");
-    check("typed string param accepts string", "fn t(a : u32, b : string) -> i64\n{\n    print(type_id(b));\n    return 0;\n}\nfn main()\n{\n    t(5, \"hi\");\n}\n", "12\n");
+    check("typed string param accepts string", "fn t(a : u32, b : string) -> i64\n{\n    print(#type_id(b));\n    return 0;\n}\nfn main()\n{\n    t(5, \"hi\");\n}\n", "12\n");
 
     // A typed parameter is passed as a full 64-bit slot, so printing it must
     // truncate the value to the declared width: a u8 parameter holding 300
@@ -1526,8 +1526,8 @@ static void positive_tests() {
     // location, i.e. the pointer itself with one level peeled (`&*p` ≡ `p`).
     check("address of deref is the pointer", "fn main()\n{\n    x := 10;\n    p := &x;\n    q := &^p;\n    print(^q);\n}\n", "10\n");
     check("address of deref peels one level", "fn main()\n{\n    x := 10;\n    p := &x;\n    q := &p;\n    r := &^^q;\n    print(^r);\n}\n", "10\n");
-    check("type_of address of deref", "fn main()\n{\n    x := 5;\n    p := &x;\n    print(type_of(&^p));\n}\n", "i64^");
-    check("type_of address of deeper deref", "fn main()\n{\n    x := 5;\n    p := &x;\n    q := &p;\n    print(type_of(&^^q));\n}\n", "i64^");
+    check("type_of address of deref", "fn main()\n{\n    x := 5;\n    p := &x;\n    print(#type_of(&^p));\n}\n", "i64^");
+    check("type_of address of deeper deref", "fn main()\n{\n    x := 5;\n    p := &x;\n    q := &p;\n    print(#type_of(&^^q));\n}\n", "i64^");
     check("address of deref passed to typed param", "fn getId(q : i64^) -> i64\n{\n    return ^q;\n}\nfn main()\n{\n    x := 10;\n    p := &x;\n    print(getId(&^p));\n}\n", "10\n");
     check("store through address of deref", "fn main()\n{\n    x := 10;\n    p := &x;\n    ^(&^p) = 20;\n    print(x);\n}\n", "20\n");
     check("store through peeled double deref", "fn main()\n{\n    x := 10;\n    p := &x;\n    q := &p;\n    ^(&^^q) = 99;\n    print(x);\n}\n", "99\n");
@@ -1535,7 +1535,7 @@ static void positive_tests() {
     check("read through address of deref", "fn main()\n{\n    x := 7;\n    p := &x;\n    print(^(&^p));\n}\n", "7\n");
     check("deref of address of double deref", "fn main()\n{\n    x := 9;\n    p := &x;\n    q := &p;\n    print(^(&^^q));\n}\n", "9\n");
     check("address of parenthesized variable", "fn main()\n{\n    x := 5;\n    p := &(x);\n    print(^p);\n}\n", "5\n");
-    check("type_of address of deref of param", "fn meta(p : i64^) -> i64\n{\n    print(type_of(&^p));\n    return 0;\n}\nfn main()\n{\n    x := 5;\n    meta(&x);\n}\n", "i64^");
+    check("type_of address of deref of param", "fn meta(p : i64^) -> i64\n{\n    print(#type_of(&^p));\n    return 0;\n}\nfn main()\n{\n    x := 5;\n    meta(&x);\n}\n", "i64^");
 
     // Pointer equality compares raw addresses; relational pointer order and
     // pointer-vs-number comparisons are rejected.
@@ -1631,13 +1631,13 @@ static void positive_tests() {
 
     // Pointer re-interpretation casts (`&x as u8^`) are PTR->PTR only and are
     // free (same 64-bit address); the cast's pointee/depth flow into arg
-    // checks, derefs and `type_of`.
+    // checks, derefs and `#type_of`.
     check("cast pointer passed to typed param", "fn poke(p : u8^) -> i64\n{\n    ^p = 200;\n    return 0;\n}\nfn main()\n{\n    x := 300 as u8;\n    poke(&x as u8^);\n    print(x);\n}\n", "200\n");
     check("cast pointer deref-store", "fn main()\n{\n    x := 300 as u8;\n    ^(&x as u8^) = 200;\n    print(x);\n}\n", "200\n");
     check("cast pointer deref read", "fn main()\n{\n    x := 7;\n    p := &x as i64^;\n    print(^p);\n}\n", "7\n");
     check("cast to deeper pointer chain", "fn main()\n{\n    x := 5;\n    p := &x;\n    q := &p as i64^^;\n    print(^^q);\n}\n", "5\n");
     check("cast to triple pointer chain", "fn main()\n{\n    x := 9;\n    p := &x;\n    q := &p;\n    r := &q as i64^^^;\n    print(^^^r);\n}\n", "9\n");
-    check("type_of cast", "fn main()\n{\n    x := 5;\n    print(type_of(&x as u8^));\n}\n", "u8^");
+    check("type_of cast", "fn main()\n{\n    x := 5;\n    print(#type_of(&x as u8^));\n}\n", "u8^");
 
     // --- typed declarations (`x : TYPE = value`) ------------------------
     // The type annotation is optional (`x := v` infers it). When present it
@@ -1650,15 +1650,15 @@ static void positive_tests() {
     check("typed decl small value", "fn main()\n{\n    c : u8 = 7;\n    print(c);\n}\n", "7\n");
     check("typed decl bool", "fn main()\n{\n    e : bool = true;\n    print(e);\n}\n", "true\n");
     check("typed decl string", "fn main()\n{\n    f : string = \"hi\";\n    print(f);\n}\n", "hi");
-    check("typed decl type_of", "fn main()\n{\n    a : i64 = 123;\n    b : u8 = 300;\n    d : i64 = 300 as u8;\n    e : bool = true;\n    print(type_of(a));\n    print(type_of(b));\n    print(type_of(d));\n    print(type_of(e));\n}\n", "i64u8i64bool");
+    check("typed decl type_of", "fn main()\n{\n    a : i64 = 123;\n    b : u8 = 300;\n    d : i64 = 300 as u8;\n    e : bool = true;\n    print(#type_of(a));\n    print(#type_of(b));\n    print(#type_of(d));\n    print(#type_of(e));\n}\n", "i64u8i64bool");
     check("typed decl shrunk value compared", "fn main()\n{\n    b : u8 = 300;\n    print(b > 255);\n}\n", "false\n");
     check("typed decl copy from variable", "fn main()\n{\n    s := 5;\n    t : i64 = s;\n    print(t);\n}\n", "5\n");
     check("typed decl then reassign", "fn main()\n{\n    x : i64 = 5;\n    x = 6;\n    print(x);\n}\n", "6\n");
     check("typed decl recompute as u8", "fn main()\n{\n    y : i64 = 1;\n    y = 300 as u8;\n    print(y);\n}\n", "44\n");
     check("typed decl redeclare", "fn main()\n{\n    z := 4;\n    z : i64 = 9;\n    print(z);\n}\n", "9\n");
-    check("typed decl pointer", "fn main()\n{\n    x := 7;\n    p : i64^ = &x;\n    print(^p);\n    print(type_of(p));\n}\n", "7\ni64^");
-    check("typed decl pointer chain", "fn main()\n{\n    x := 7;\n    p := &x;\n    q : i64^^ = &p;\n    print(^^q);\n    print(type_of(q));\n}\n", "7\ni64^^");
-    check("typed decl pointer metadata override", "fn main()\n{\n    x := 7;\n    r : u8^ = &x;\n    print(^r);\n    print(type_of(r));\n}\n", "7\nu8^");
+    check("typed decl pointer", "fn main()\n{\n    x := 7;\n    p : i64^ = &x;\n    print(^p);\n    print(#type_of(p));\n}\n", "7\ni64^");
+    check("typed decl pointer chain", "fn main()\n{\n    x := 7;\n    p := &x;\n    q : i64^^ = &p;\n    print(^^q);\n    print(#type_of(q));\n}\n", "7\ni64^^");
+    check("typed decl pointer metadata override", "fn main()\n{\n    x := 7;\n    r : u8^ = &x;\n    print(^r);\n    print(#type_of(r));\n}\n", "7\nu8^");
     check("typed decl pointer store", "fn main()\n{\n    x := 7;\n    p : i64^ = &x;\n    ^p = 9;\n    print(x);\n}\n", "9\n");
     check_error("typed decl bool from int", "fn main()\n{\n    b : bool = 5;\n}\n", "Cannot assign i64 to bool variable");
     check_error("typed decl int from string", "fn main()\n{\n    i : i64 = \"str\";\n}\n", "Cannot assign string to i64 variable");
@@ -2099,7 +2099,7 @@ static void error_tests() {
     check_error("too many arguments", "fn foo(a : i64, b : i64) -> i64\n{\n    return a + b;\n}\nfn main()\n{\n    print(foo(1, 2, 3));\n}\n");
     check_error("zero arguments for expected two", "fn foo(a : i64, b : i64) -> i64\n{\n    return a + b;\n}\nfn main()\n{\n    foo();\n}\n");
     check_error("main called with args", "fn main()\n{\n    main(1);\n}\n");
-    check_error("builtin wrong arg count", "fn main()\n{\n    print(type_id(1, 2));\n}\n");
+    check_error("builtin wrong arg count", "fn main()\n{\n    print(#type_id(1, 2));\n}\n");
     check_error("offset_of wrong arg count", "struct H { a : u8 }\nfn main()\n{\n    print(offset_of(H));\n}\n", "expects exactly 2 arguments");
     check_error("align_of wrong arg count", "struct H { a : u8 }\nfn main()\n{\n    print(align_of(H, \"a\"));\n}\n", "expects exactly 1 argument");
     check_error("offset_of unknown struct", "fn main()\n{\n    print(offset_of(Nope, \"a\"));\n}\n", "Cannot find struct with name: 'Nope'");
@@ -2130,6 +2130,18 @@ static void error_tests() {
     check_error("no ptr mult", "extern fn malloc(size : u64) -> void^\nfn main()\n{\n    p := malloc(8) as u8^;\n    x := p * 2;\n}\n", "Invalid operands to MULT operation");
     check_error("no ptr divide", "extern fn malloc(size : u64) -> void^\nfn main()\n{\n    p := malloc(8) as u8^;\n    x := p / 2;\n}\n", "Invalid operands to DIVIDE operation");
     check_error("no two ptrs minus", "extern fn malloc(size : u64) -> void^\nfn main()\n{\n    a := malloc(8) as u8^;\n    b := malloc(8) as u8^;\n    d := a - b;\n}\n", "Invalid operands to MINUS operation");
+
+    // `#assert <expr>` evaluates its operand entirely at compile time and
+    // fails compilation (with the directive's file and line) when the result
+    // is below 1. Passing asserts emit no code at all.
+    check("#assert passes at top level and in functions", "#assert 1\n#assert 2 + 3 == 5\n#assert true\nfn main()\n{\n    #assert 10 > 5\n    print(\"ok\\n\");\n}\n", "ok\n");
+    check_error("#assert zero fails", "fn main()\n{\n    #assert 0\n}\n", "#assert failed: expression evaluated to 0");
+    check_error("#assert false fails", "fn main()\n{\n    #assert false\n}\n", "#assert failed");
+    check_error("#assert failed comparison", "fn main()\n{\n    #assert 1 > 2\n}\n", "#assert failed");
+    check_error("#assert negative fails", "fn main()\n{\n    #assert -5\n}\n", "#assert failed: expression evaluated to -5");
+    check_error("#assert string type", "fn main()\n{\n    #assert \"str\"\n}\n", "#assert expression must be of a numeric or bool type, got string");
+    check_error("#assert runtime value", "fn main()\n{\n    x := 5\n    #assert x\n}\n", "#assert expression must be a compile-time constant");
+    check_error("#unknown directive", "#foo 1\n", "Unknown compile-time directive '#foo'");
     check_error("reserved __ prefix", "fn __mine() -> i64\n{\n    return 0;\n}\nfn main() -> i64\n{\n    return 0;\n}\n", "reserved '__' prefix");
     check_error("reserved __ prefix 2", "fn __x()\n{\n    print(1);\n}\nfn main()\n{\n    print(1);\n}\n", "reserved '__' prefix");
     check_error("reserved __ variable", "fn main()\n{\n    __x := 5;\n    print(__x);\n}\n", "reserved '__' prefix");
@@ -2137,9 +2149,10 @@ static void error_tests() {
     check_error("reserved __ parameter", "fn foo(__x : i64)\n{\n    print(__x);\n}\nfn main()\n{\n    foo(1);\n}\n", "reserved '__' prefix");
     check_error("reserved __ struct name", "struct __Point\n{\n    x : i64\n}\nfn main()\n{\n    print(1);\n}\n", "reserved '__' prefix");
     check_error("reserved __ struct field", "struct Point\n{\n    __x : i64\n}\nfn main()\n{\n    print(1);\n}\n", "reserved '__' prefix");
-    check_error("reserved type_id", "fn type_id() -> i64\n{\n    return 0;\n}\nfn main() -> i64\n{\n    return 0;\n}\n");
-    check_error("reserved type_size", "fn type_size() -> i64\n{\n    return 0;\n}\nfn main() -> i64\n{\n    return 0;\n}\n");
-    check_error("reserved type_of", "fn type_of() -> i64\n{\n    return 0;\n}\nfn main() -> i64\n{\n    return 0;\n}\n");
+    // The reflection builtins lex as `#`-directives, so their old spellings
+    // are no longer reserved: user functions may reuse those names.
+    check("type_ names not reserved", "fn type_of(x : i64) -> i64\n{\n    return x + 1;\n}\nfn main()\n{\n    print(type_of(41));\n}\n", "42\n");
+    check_error("#type_id no args", "fn main()\n{\n    print(#type_id());\n}\n", "expects exactly 1 argument");
     check_error("reserved print keyword", "fn print() -> i64\n{\n    return 0;\n}\nfn main() -> i64\n{\n    return 0;\n}\n");
     check_error("reserved fn keyword", "fn fn() -> i64\n{\n    return 0;\n}\nfn main() -> i64\n{\n    return 0;\n}\n");
     check_error("inconsistent return types", "fn foo() -> i64\n{\n    if 1 { return 5; }\n    return \"str\";\n}\nfn main()\n{\n    print(1);\n}\n", "Inconsistent return type");

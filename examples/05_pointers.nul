@@ -7,8 +7,8 @@
 //   null      the null pointer literal
 //
 // Pointers print as lowercase hex with a 0x prefix (null = 0x0).
-// Multi-level pointers (T^^) are supported. type_of() reports the
-// pointed-at type, type_id() gives a numeric id.
+// Multi-level pointers (T^^) are supported. #type_of() reports the
+// pointed-at type, #type_id() gives a numeric id.
 // ------------------------------------------------------------------
 
 fn main()
@@ -58,10 +58,10 @@ fn main()
     print(pb);      // 0x...
     print(^pb);     // 9
 
-    // type_of() prints the pointee type; type_id() a number.
-    print(type_of(p));    // i64^
-    print(type_of(^p));   // i64
-    print(type_id(p) == type_id(^p));
+    // #type_of() prints the pointee type; #type_id() a number.
+    print(#type_of(p));    // i64^
+    print(#type_of(^p));   // i64
+    print(#type_id(p) == #type_id(^p));
 
     // A pointer to a pointer still has an address.
     print(&r);
