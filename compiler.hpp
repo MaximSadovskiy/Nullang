@@ -147,6 +147,11 @@ enum InstructionType
     OP_LOAD_PTR,
     OP_STORE_PTR,
     OP_ALLOC,
+    // __entry reads the OS-provided command line: OP_ENTRY_ARGC loads the
+    // argument count and OP_ENTRY_ARGV the pointer to the argument array from
+    // the entry stack, so the synthesized `call main` can pass them on.
+    OP_ENTRY_ARGC,
+    OP_ENTRY_ARGV,
 };
 // Physical registers available to the linear-scan allocator. rax/rbx/rcx/rdx
 // stay reserved as codegen scratch (arithmetic temporaries, idiv operands,
@@ -1773,6 +1778,8 @@ const char* inst_type_to_str(InstructionType type) {
         case OP_LOAD_PTR: return "LOAD_PTR";
         case OP_STORE_PTR: return "STORE_PTR";
         case OP_ALLOC: return "ALLOC";
+        case OP_ENTRY_ARGC: return "ENTRY_ARGC";
+        case OP_ENTRY_ARGV: return "ENTRY_ARGV";
 
         default: UNREACHABLE("inst_type_to_str");
     }
@@ -3305,18 +3312,24 @@ Expression* parse_expression(Lexer& lexer, Expression* lhs, int min_prec, bool a
        if (!rhs) {
            compiler_error(op, "Expected expression after operator: '" SV_FORMAT "'\n", SV_ARG(op.val));
        }
-       if (op.type == Tok_Cast && rhs->type == Expr_Binary) {
-           // `expr as u8^` / `expr as bool^^`: the `^` suffixes after the cast
-           // type keyword are the pointer indirection depth, so `x as u8^` is a
-           // pointer re-interpretation cast, never `(x as u8) ^ something`.
-           auto* cast_type = static_cast<BinaryExpr*>(rhs);
-           if (cast_type->tok.type == Tok_Type) {
-               while (lexer.peak().type == Tok_Caret) {
-                   lexer.next();
-                   ++cast_type->ptr_depth;
-               }
-           }
-       }
+        if (op.type == Tok_Cast && rhs->type == Expr_Binary) {
+            // `expr as u8^` / `expr as bool^^`: the `^` suffixes after the cast
+            // type keyword are the pointer indirection depth, so `x as u8^` is a
+            // pointer re-interpretation cast, never `(x as u8) ^ something`.
+            // Struct names lex as identifiers, so `as Pair^` must resolve the
+            // name against visible structs too, or its `^` leaks into the next
+            // statement and garbles the parse.
+            auto* cast_type = static_cast<BinaryExpr*>(rhs);
+            const bool names_type = cast_type->tok.type == Tok_Type
+                || (cast_type->tok.type == Tok_Ident && !cast_type->lhs
+                    && find_visible_struct(cast_type->tok.val, cast_type->module_name) != Array<DeclaredStruct>::INVALID_INDEX);
+            if (names_type) {
+                while (lexer.peak().type == Tok_Caret) {
+                    lexer.next();
+                    ++cast_type->ptr_depth;
+                }
+            }
+        }
        lhs = new_binary_expr(op, lhs, rhs);
     }
 
@@ -3448,6 +3461,25 @@ void add_function_or_report_if_exit(FunctionExpr* expr)
     g_functions.push(DeclaredFunction{expr->tok.val, expr, {}, {}, expr->return_type, expr->return_struct_name, expr->return_struct_module, expr->return_pointee, expr->return_ptr_depth, expr->return_pointee_struct_name, expr->return_pointee_struct_module});
     g_functions.last().is_extern = expr->is_extern;
     g_functions.last().module_name = g_current_module_name;
+
+    // `main` is special: __entry forwards the OS command line to it, so its
+    // signature is constrained to `(argc : i64)` and/or `(argc : i64,
+    // argv : ptr)`. Validated at declaration time (not in compile_program) so
+    // the error is reported reliably by the test harness.
+    if (expr->tok.val == "main") {
+        auto& args = expr->arg_types;
+        auto arg_count = args.count();
+        if (arg_count > 2)
+            compiler_error(expr->tok, "'main' takes at most 2 arguments (argc : i64, argv : str^)\n");
+        if (arg_count >= 1 && args[0].type != TYPE_I64)
+            compiler_error(expr->tok, "First parameter of 'main' must be 'i64'\n");
+        if (arg_count >= 2) {
+            if (args[1].type != TYPE_PTR || args[1].pointee != TYPE_STR || args[1].ptr_depth != 1)
+                compiler_error(expr->tok, "Second parameter of 'main' must be 'str^'\n");
+        } 
+        if (is_windows_target() && arg_count > 0)
+            compiler_error(expr->tok, "'main' with command line arguments is not supported on the Windows target yet\n");
+    }
 }
 
 bool parse(Lexer& lexer, Array<Expression*>& exprs) {
@@ -3493,14 +3525,21 @@ bool is_valid_operation(InstructionType operation_type, ValueType lhs, ValueType
         case OP_MOD: {
             if (lhs == TYPE_BOOL || rhs == TYPE_BOOL)
                 return false;
-            if (!is_numeric_type(lhs) && !is_numeric_type(rhs))
-                return false;
             if (is_numeric_type(lhs) && is_numeric_type(rhs)) {
                 result_type = promote_type(lhs, rhs);
                 return true;
             }
-            result_type = MAX(lhs, rhs);
-            return true;
+            // Pointer arithmetic: exactly one pointer operand mixed with a
+            // number, and only for +/- (`argv + i`, `p - 8`). Multiplying,
+            // dividing, or modulo-ing addresses (and any use of strings,
+            // arrays or structs here) is invalid.
+            if ((operation_type == OP_PLUS || operation_type == OP_MINUS)
+                && ((lhs == TYPE_PTR && is_numeric_type(rhs))
+                    || (rhs == TYPE_PTR && is_numeric_type(lhs)))) {
+                result_type = TYPE_PTR;
+                return true;
+            }
+            return false;
         }
 
         case OP_GREATER_EQUALS:
@@ -4443,6 +4482,12 @@ bool compile_ops(StrBuilder& builder, Array<Instruction>& ops, Array<VirtualReg>
     for (auto& reg : regs)
         if (reg.phys >= 0 && reg.phys < PR_COUNT && phys_callee_saved(reg.phys))
             cs_used[reg.phys] = true;
+    // Must match compile_function's `cs_push_count`: the prologue pushes these
+    // registers before rbp, so a register is pushed iff a callee-saved phys is
+    // in use anywhere in the body.
+    usize cs_push_count = 0;
+    for (s8 p = 0; p < PR_COUNT; ++p)
+        if (cs_used[p]) ++cs_push_count;
     auto emit_epilogue_pops = [&](StrBuilder& b) {
         for (s8 p = PR_COUNT - 1; p >= 0; --p)
             if (cs_used[p])
@@ -4469,6 +4514,40 @@ bool compile_ops(StrBuilder& builder, Array<Instruction>& ops, Array<VirtualReg>
                 if (!reg.is_visited) continue;
                 builder.append("\tmov QWORD [rbp - ") << reg.offset << ']' << ',';
                 builder << (u8)reg.bool_val << '\n';
+            } break;
+
+            case OP_ENTRY_ARGC:
+            case OP_ENTRY_ARGV: {
+                auto& reg = regs[current_inst.reg_index];
+                if (!reg.is_visited) continue;
+                // The OS starts the process with argc at [rsp] and the argument
+                // array at [rsp+8]. The prologue pushes the callee-saved
+                // registers and rbp (never shrinking the OS area), so those
+                // values still sit at [rbp + 8 + 8*cs_push_count] /
+                // [rbp + 16 + 8*cs_push_count] once the body runs. On Windows
+                // the PE loader leaves no such layout, so main(argc, argv) is
+                // rejected at compile time and this path is SysV-only.
+                const usize entry_base = 8 + 8 * cs_push_count;
+                const usize entry_off = current_inst.type == OP_ENTRY_ARGC ? entry_base : entry_base + 8;
+                if (current_inst.type == OP_ENTRY_ARGC) {
+                    if (reg.phys != PR_NONE) {
+                        (builder.append("\tmov ").append(phys_name(reg.phys))).append(", [rbp + ");
+                        builder << entry_off << ']' << '\n';
+                    } else {
+                        builder.append("\tmov rax, [rbp + ");
+                        builder << entry_off << ']' << '\n';
+                        (builder.append("\tmov [rbp - ") << reg.offset).append("], rax\n");
+                    }
+                } else {
+                    if (reg.phys != PR_NONE) {
+                        (builder.append("\tlea ").append(phys_name(reg.phys))).append(", [rbp + ");
+                        builder << entry_off << ']' << '\n';
+                    } else {
+                        builder.append("\tlea rax, [rbp + ");
+                        builder << entry_off << ']' << '\n';
+                        (builder.append("\tmov [rbp - ") << reg.offset).append("], rax\n");
+                    }
+                }
             } break;
 
             case OP_PUSH_STR: {
@@ -5062,14 +5141,34 @@ bool compile_function(StrBuilder& builder, DeclaredFunction func)
     if (has_frame) {
         builder.append("\tpush rbp\n");
         builder.append("\tmov rbp, rsp\n");
-        if (is_windows_target())
+        // __entry is entered by the OS with rsp 16-byte aligned and no return
+        // address on the stack, so unlike a normally-called function (entered
+        // with rsp ≡ 8 mod 16, i.e. ≡ 0 mod 16 right after `push rbp`) its
+        // prologue leaves rsp ≡ 8 mod 16. Always realign it so every `call` in
+        // the body (e.g. the synthesized `call main`) happens with rsp
+        // 16-byte aligned, as the SysV/Microsoft ABIs require. Ordinary
+        // functions need no `and rsp`: their frame subtract (below) is padded
+        // to keep rsp aligned through the body.
+        if (is_entry || is_windows_target())
             builder.append("\tand rsp, -16\n");
-        // Align the reserved frame size to 16 bytes on Windows so every call
-        // inside the body starts from an aligned rsp (the op-call site only
-        // pads the argument area; the `mov rsp, rbp` epilogue is unaffected).
+        // Align the reserved frame size so every call inside the body starts
+        // from an aligned rsp (the op-call site only pads the argument area;
+        // the `mov rsp, rbp` epilogue is unaffected). Microsoft x64 wants the
+        // frame itself 16-byte aligned. SysV realigns rsp instead: a
+        // normally-called function is entered with rsp ≡ 8 mod 16 and the
+        // prologue pushed cs_push_count registers then rbp, so the subtract
+        // must satisfy (8*(cs_push_count+1) + frame_sub) ≡ 8 (mod 16), i.e.
+        // frame_sub ≡ 8*cs_push_count (mod 16). __entry already ran
+        // `and rsp, -16` above, so it only needs frame_sub ≡ 0 (mod 16).
         usize frame_sub = registers_size + struct_area_size;
-        if (is_windows_target())
+        if (is_windows_target()) {
             frame_sub = (registers_size + struct_area_size + 15) & ~(usize)15;
+        } else {
+            const usize mod_target = is_entry ? 0 : (8 * cs_push_count) & 15;
+            const usize cur_mod = frame_sub & 15;
+            if (cur_mod != mod_target)
+                frame_sub += (mod_target - cur_mod) & 15;
+        }
         if (frame_sub > 0)
             builder.append("\tsub rsp, ") << frame_sub << '\n';
     }
@@ -5221,19 +5320,10 @@ bool compile_function(StrBuilder& builder, DeclaredFunction func)
         ret_reg.int_val = 0;
         func.ops.push(Instruction{.type = OP_RET, .location = func.expr ? func.expr->tok : eof_token(), .reg_index= ret_reg.index, .is_visited = true,});
 	}
-	if (is_entry) {
-        // Resolve `main` regardless of which module declares it: __entry
-        // (global module) calls it through its mangled label.
-        auto main_module = StrView("");
-        auto main_index = find_function_any_module("main");
-        if (main_index != Array<DeclaredFunction>::INVALID_INDEX)
-            main_module = g_functions[main_index].module_name;
-        auto reg = allocate_reg(func.regs);
-        func.ops.push(Instruction{.type = OP_CALL, .data_type = TYPE_CALL, .call = {Token{Tok_StrLit, "main"}, 0, false, main_module}, .reg_index = reg.index, .is_visited = true});
-        auto exit_reg = allocate_reg(func.regs);
-        func.ops.push(Instruction{.type = OP_CALL, .data_type = TYPE_CALL, .call = {Token{Tok_StrLit, "__exit"}, 0}, .reg_index = exit_reg.index, .is_visited = true});
-    }
-    compile_ops(builder, func.ops, func.regs, has_frame);
+	// __entry's calls to main and __exit, plus the OP_ENTRY_ARGC/OP_ENTRY_ARGV
+	// captures of the OS command line, are synthesized in compile_program before
+	// the optimization passes run, so they are laid out like any other body.
+	compile_ops(builder, func.ops, func.regs, has_frame);
 
 	return true;
 }
@@ -5317,7 +5407,9 @@ void dead_code(DeclaredFunction& func) {
             case OP_PUSH_I64:
             case OP_PUSH_I32:
             case OP_PUSH_I16:
-            case OP_PUSH_I8: {
+            case OP_PUSH_I8:
+            case OP_ENTRY_ARGC:
+            case OP_ENTRY_ARGV: {
                 auto& reg = regs[inst.reg_index];
                 if (!reg.is_comp_time)
                     reg.is_visited = true;
@@ -5504,7 +5596,9 @@ void reg_reads_and_writes(Instruction& inst, Array<bool>& gen, Array<bool>& kill
         case OP_PUSH_I64:
         case OP_PUSH_PTR:
         case OP_PUSH_STR:
-        case OP_PUSH_BOOL: {
+        case OP_PUSH_BOOL:
+        case OP_ENTRY_ARGC:
+        case OP_ENTRY_ARGV: {
             write(inst.reg_index);
         } break;
         default: break;
@@ -5724,6 +5818,8 @@ static bool reg_is_touched(Instruction& inst, usize r) {
         case OP_PUSH_BOOL:
         case OP_LABEL:
         case OP_JMP:
+        case OP_ENTRY_ARGC:
+        case OP_ENTRY_ARGV:
             return inst.reg_index == r;
         case OP_INC:
             return inst.binop.lhs_index == r;
@@ -6016,7 +6112,7 @@ void allocate_registers(DeclaredFunction& func)
     }
 }
 
-void add_std_library(StrBuilder& builder, bool is_windows)
+void add_std_library(StrBuilder& builder, bool is_windows, bool has_extern)
 {
     if (is_windows) {
         builder.append("__print_num:\n");
@@ -6402,9 +6498,21 @@ void add_std_library(StrBuilder& builder, bool is_windows)
         builder.append("\tsyscall\n");
         builder.append("\tret\n");
         builder.append("__exit:\n");
-        builder.append("\tmov	rdi, rax\n");
-        builder.append("\tmov	rax, 60\n");
-        builder.append("\tsyscall\n");
+        if (has_extern) {
+            // libc is linked, so hand control back through libc's exit(): the
+            // raw exit_group syscall would skip stdio flushing, silently
+            // dropping anything printf/puts buffered. (Nul's own print helpers
+            // write with raw syscalls and need no flush.) __exit is entered
+            // with rsp ≡ 8 mod 16 like any callee, so sub rsp, 8 makes the
+            // call site 16-byte aligned for libc.
+            builder.append("\tmov	rdi, rax\n");
+            builder.append("\tsub	rsp, 8\n");
+            builder.append("\tcall	exit\n");
+        } else {
+            builder.append("\tmov	rdi, rax\n");
+            builder.append("\tmov	rax, 60\n");
+            builder.append("\tsyscall\n");
+        }
     }
 }
 
@@ -6460,7 +6568,7 @@ bool compile_program(Array<Instruction>& global_ops, Array<VirtualReg>& global_r
         builder.append("section '.data' data readable writeable\n");
         append_string_data(builder);
         builder.append("\nsection '.code' code readable executable\n");
-        add_std_library(builder, true);
+        add_std_library(builder, true, has_extern);
     } else {
         builder.append("format ELF64\n\n");
         builder.append("section '.text' executable\n");
@@ -6471,19 +6579,74 @@ bool compile_program(Array<Instruction>& global_ops, Array<VirtualReg>& global_r
         for (auto& func : g_functions)
             if (func.is_extern)
                 (builder.append("extrn ").append(func.name)).append('\n');
+        // When libc is linked, __exit routes through its exit() to flush stdio.
+        if (has_extern)
+            builder.append("extrn exit\n");
         builder.append('\n');
-        add_std_library(builder, false);
+        add_std_library(builder, false, has_extern);
     }
 
     // Global-statement ops become the __entry function's body, so they go
     // through the same optimization/register-allocation passes as every other
     // function body, and __entry is compiled as a single function.
-    for (usize i = 0; i < g_functions.count(); ++i)
-        if (g_functions[i].name == "__entry") {
-            g_functions[i].ops = global_ops;
-            g_functions[i].regs = global_regs;
-            break;
+    for (usize i = 0; i < g_functions.count(); ++i) {
+        if (g_functions[i].name != "__entry") continue;
+        auto& entry = g_functions[i];
+
+        // Resolve `main` regardless of which module declares it: __entry
+        // (global module) calls it through its mangled label. If main declares
+        // parameters, they are the OS command line: argc and argv.
+        auto main_module = StrView("");
+        auto main_index = find_function_any_module("main");
+        if (main_index != Array<DeclaredFunction>::INVALID_INDEX)
+            main_module = g_functions[main_index].module_name;
+        usize main_argc = 0;
+        if (main_index != Array<DeclaredFunction>::INVALID_INDEX && g_functions[main_index].expr)
+            main_argc = g_functions[main_index].expr->args.count();
+        // main's signature is validated at declaration time
+        // (add_function_or_report_if_exit); here we only need the arg count to
+        // forward argc/argv from __entry.
+
+        // Build __entry's body: capture argc/argv from the entry stack, run the
+        // global-statement ops, then call main and __exit. The whole stream is
+        // built up front so every op and register runs through dead_code,
+        // register allocation and offset layout like any other function body.
+        Array<Instruction> entry_ops{};
+        usize argc_reg_index = (usize)-1;
+        usize argv_reg_index = (usize)-1;
+        if (main_argc >= 1) {
+            global_regs.push(VirtualReg{global_regs.count(), 0});
+            auto& argc_reg = global_regs.last();
+            argc_reg.is_visited = true;
+            argc_reg.type = TYPE_I64;
+            argc_reg_index = argc_reg.index;
+            entry_ops.push(Instruction{.type = OP_ENTRY_ARGC, .location = entry.expr ? entry.expr->tok : eof_token(), .reg_index = argc_reg.index, .is_visited = true});
         }
+        if (main_argc >= 2) {
+            global_regs.push(VirtualReg{global_regs.count(), 0});
+            auto& argv_reg = global_regs.last();
+            argv_reg.is_visited = true;
+            argv_reg.type = TYPE_PTR;
+            argv_reg_index = argv_reg.index;
+            entry_ops.push(Instruction{.type = OP_ENTRY_ARGV, .location = entry.expr ? entry.expr->tok : eof_token(), .reg_index = argv_reg.index, .is_visited = true});
+        }
+        for (auto& op : global_ops)
+            entry_ops.push(op);
+        auto main_reg = allocate_reg(global_regs);
+        Instruction main_call{.type = OP_CALL, .data_type = TYPE_CALL, .call = {Token{Tok_StrLit, "main"}, 0, false, main_module}, .reg_index = main_reg.index, .is_visited = true};
+        if (main_argc >= 1)
+            main_call.call.args.push(CallArg{nullptr, TYPE_I64, argc_reg_index, STACK_REGISTER_SIZE});
+        if (main_argc >= 2)
+            main_call.call.args.push(CallArg{nullptr, TYPE_PTR, argv_reg_index, STACK_REGISTER_SIZE});
+        entry_ops.push(main_call);
+        auto exit_reg = allocate_reg(global_regs);
+        entry_ops.push(Instruction{.type = OP_CALL, .data_type = TYPE_CALL, .location = eof_token(), .call = {Token{Tok_StrLit, "__exit"}, 0}, .reg_index = exit_reg.index, .is_visited = true});
+
+        entry.ops = entry_ops;  // takes ownership of entry_ops' buffer
+        global_ops.cleanup();   // free the original caller-provided buffer
+        entry.regs = global_regs;
+        break;
+    }
 
     const usize user_code_start = builder.count();
     for (auto& func : g_functions) {
@@ -7292,14 +7455,54 @@ static void pointer_metadata(Expression* target, Array<Variable>& local_vars, Va
         auto* bin = static_cast<BinaryExpr*>(target);
         if (bin->tok.type == Tok_Cast && bin->rhs && bin->rhs->type == Expr_Binary) {
             auto* cast_type = static_cast<BinaryExpr*>(bin->rhs);
-            if (cast_type->tok.type == Tok_Type && cast_type->ptr_depth > 0) {
+            // Builtin type names lex as Tok_Type; struct names as Tok_Ident.
+            const bool names_type = cast_type->tok.type == Tok_Type
+                || (cast_type->tok.type == Tok_Ident && !cast_type->lhs
+                    && find_visible_struct(cast_type->tok.val, cast_type->module_name) != Array<DeclaredStruct>::INVALID_INDEX);
+            if (names_type && cast_type->ptr_depth > 0) {
                 pointee = str_to_value_type(cast_type->tok.val);
+                if (pointee == TYPE_NOP) {
+                    pointee = TYPE_STRUCT;
+                    pointee_struct = cast_type->tok.val;
+                    pointee_struct_module = cast_type->module_name;
+                } else {
+                    pointee_struct = "";
+                    pointee_struct_module = "";
+                }
                 depth = cast_type->ptr_depth;
-                pointee_struct = "";
-                pointee_struct_module = "";
                 return;
             }
         }
+        // `p + n`, `n + p`, `p - n` pointer arithmetic: the result keeps the
+        // pointer operand's metadata (`x := argv + i` infers x as `str^`).
+        if ((bin->tok.type == Tok_Plus || bin->tok.type == Tok_Minus)
+            && bin->lhs && bin->rhs) {
+            ValueType l_pointee = TYPE_NOP, r_pointee = TYPE_NOP;
+            u8 l_depth = 0, r_depth = 0;
+            StrView l_struct = "", l_module = "", r_struct = "", r_module = "";
+            pointer_metadata(bin->lhs, local_vars, l_pointee, l_depth, l_struct, l_module);
+            pointer_metadata(bin->rhs, local_vars, r_pointee, r_depth, r_struct, r_module);
+            if (l_depth > 0) {
+                pointee = l_pointee; depth = l_depth;
+                pointee_struct = l_struct; pointee_struct_module = l_module;
+                return;
+            }
+            if (r_depth > 0) {
+                pointee = r_pointee; depth = r_depth;
+                pointee_struct = r_struct; pointee_struct_module = r_module;
+                return;
+            }
+        }
+    }
+    // Only a bare identifier names a variable here. Anything else reaching
+    // the fallthrough (a literal operand of pointer arithmetic, an index
+    // expression, ...) simply carries no pointer metadata.
+    if (target->tok.type != Tok_Ident) {
+        pointee = TYPE_NOP;
+        depth = 0;
+        pointee_struct = "";
+        pointee_struct_module = "";
+        return;
     }
     auto* var = get_variable(target->tok, false, &local_vars);
     if (!var || !var->is_accesible) {
@@ -7571,8 +7774,39 @@ VirtualReg translate_to_instruction(Array<Instruction>& ops, Array<VirtualReg>& 
 
             ValueType lhs_type = TYPE_NOP;
             ValueType rhs_type = TYPE_NOP;
+            // `expr as Pair^`: a struct name as cast target is not a variable
+            // reference. Like builtin type names it evaluates to a compile-time
+            // type marker; the indirection depth stays on the node for
+            // pointer_metadata.
+            bool struct_cast_target = false;
+            if (bin_expr->tok.type == Tok_Cast && bin_expr->rhs && bin_expr->rhs->type == Expr_Binary) {
+                auto* cast_type = static_cast<BinaryExpr*>(bin_expr->rhs);
+                struct_cast_target = cast_type->tok.type == Tok_Ident && !cast_type->lhs
+                    && find_visible_struct(cast_type->tok.val, cast_type->module_name) != Array<DeclaredStruct>::INVALID_INDEX;
+            }
             auto lhs_reg = translate_to_instruction(ops, regs, local_vars, bin_expr->lhs, lhs_type);
-            auto rhs_reg = translate_to_instruction(ops, regs, local_vars, bin_expr->rhs, rhs_type);
+            VirtualReg rhs_reg = struct_cast_target
+                ? make_const(regs, TYPE_I64, (s64)TYPE_STRUCT)
+                : translate_to_instruction(ops, regs, local_vars, bin_expr->rhs, rhs_type);
+            if (struct_cast_target) {
+                auto* cast_type = static_cast<BinaryExpr*>(bin_expr->rhs);
+                rhs_type = cast_type->ptr_depth > 0 ? TYPE_PTR : TYPE_STRUCT;
+                if (cast_type->ptr_depth > 0) {
+                    // A raw pointer does not directly produce a `Foo^`: that
+                    // value class is the address of a slot holding a struct's
+                    // heap base (what `&struct_var` yields), so member access
+                    // and deref both fetch the base through it. Wrap the raw
+                    // pointer in an anonymous reference cell to conform.
+                    if (lhs_type != TYPE_PTR)
+                        compiler_error(bin_expr->tok, "Invalid operands to CAST operation (%s and %s)\n", value_type_to_str(lhs_type), value_type_to_str(rhs_type));
+                    auto& cell = allocate_reg(regs);
+                    cell.type = TYPE_PTR;
+                    ops.push(Instruction{.type = OP_ALLOC, .location = bin_expr->tok, .reg_index = cell.index, .int_val = STACK_REGISTER_SIZE, .align = (u32)STACK_REGISTER_SIZE});
+                    ops.push(Instruction{.type = OP_STORE_PTR, .location = bin_expr->tok, .binop = {OP_STORE_PTR, cell.index, lhs_reg.index}, .reg_index = lhs_reg.index});
+                    return_type = TYPE_PTR;
+                    return cell;
+                }
+            }
             // u32 _index = regs.count() - 1;
             auto& operation = bin_expr->tok.type;
             if (operation == Tok_IntLit) {

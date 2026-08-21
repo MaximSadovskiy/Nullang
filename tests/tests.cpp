@@ -1319,10 +1319,10 @@ static void positive_tests() {
               "mov rdi, 2\n\tmov rsi, 3", "mov [rsp", "5\n");
     check_asm("arg function frameless",
               "fn add(a : i64, b : i64) -> i64\n{\n    return a + b;\n}\nfn main()\n{\n    print(add(2, 3));\n}\n",
-              "__add:\n\tmov r8, rdi", "sub rsp", "5\n");
+              "__add:\n\tmov r8, rdi", "__add:\n\tpush", "5\n");
     check_asm("recursive call arg in register",
               "fn fact(n : i64) -> i64\n{\n    if n < 2 { return 1; }\n    return n * fact(n - 1);\n}\nfn main()\n{\n    print(fact(5));\n}\n",
-              "lea rdi, [r12 - 1]\n\tcall __fact", "sub rsp", "120\n");
+              "lea rdi, [r12 - 1]\n\tcall __fact", "[rbp -", "120\n");
     // Peephole: redundant rax round trips are collapsed.
     check_asm("peephole forwards print arg directly",
               "fn main()\n{\n    print(5);\n}\n",
@@ -1865,6 +1865,16 @@ static void positive_tests() {
     check("extern memcpy buffers", "extern fn malloc(size : u64) -> void^\nextern fn free(ptr : void^)\nextern fn memcpy(dst : void^, src : void^, n : u64) -> void^\nfn main()\n{\n    a := malloc(4) as u8^;\n    b := malloc(4) as u8^;\n    ^a = 77;\n    memcpy(b, a, 1);\n    print(^b);\n    free(a);\n    free(b);\n}\n", "77\n");
     // extern fn returning a pointer whose result is cast and null-checked.
     check("extern getenv result", "extern fn getenv(name : void^) -> void^\nfn main()\n{\n    p := getenv(\"NOT_A_REAL_ENV_VAR_12345\") as u8^;\n    if p == null { print(\"null\\n\") }\n}\n", "null\n");
+    // Casting a raw pointer to a struct pointer (`malloc as Pair^`): the
+    // result behaves like `&struct_var`, so field access goes through it.
+    // Struct names lex as identifiers, which used to leave the cast's `^`
+    // suffix unconsumed and garble the following statements.
+    check("cast raw pointer to struct pointer", "extern fn malloc(size : u64) -> void^\nstruct Pair\n{\n    flag : bool,\n    pad : u8,\n    big : i64,\n}\nfn main()\n{\n    p := malloc(16) as Pair^;\n    p.flag = true;\n    p.pad = 7;\n    p.big = 1234;\n    print(p.flag);\n    print(p.pad);\n    print(p.big);\n}\n", "true\n7\n1234\n");
+    // Deref of a struct pointer yields a value aliasing the same block, and a
+    // typed param receives the same reference (writes are visible to caller).
+    check("cast struct pointer deref aliases", "extern fn malloc(size : u64) -> void^\nstruct Pair\n{\n    big : i64,\n}\nfn bump(p : Pair^)\n{\n    g := ^p\n    g.big = g.big + 1\n    p.big = p.big + 1;\n}\nfn main()\n{\n    p := malloc(8) as Pair^;\n    p.big = 40;\n    bump(p);\n    print(p.big);\n}\n", "42\n");
+    // A non-pointer source cannot be cast to a struct pointer.
+    check_error("cast int to struct pointer", "struct Pair\n{\n    big : i64,\n}\nfn main()\n{\n    p := 5 as Pair^;\n}\n", "Invalid operands to CAST operation");
     // A negative argument computed without a unary-minus literal.
     check("extern i64 roundtrip", "extern fn labs(x : i64) -> i64\nfn main()\n{\n    print(labs(0 - 42))\n}\n", "42\n");
     // The emitted asm must declare the C symbol so the linker resolves it.
@@ -1957,6 +1967,22 @@ static void positive_tests() {
     check_files("main in module", {
         "a.nul", "module app\nfn main()\n{\n    print(7);\n}\n",
     }, "7\n");
+
+    // __entry forwards the OS command line to main: argc is the argument
+    // count (1 when run without extra arguments) and argv points at the
+    // argument array, whose first element is the program path.
+    check("main receives argc", "fn main(argc : i64)\n{\n    print(argc);\n}\n", "1\n");
+    check("main receives argc argv", "fn main(argc : i64, argv : str^)\n{\n    print(argc);\n    print(argv != null);\n}\n", "1\ntrue\n");
+    // `strlen(^argv)` reads argv[0] directly through the char**; `^(argv + 0)`
+    // reaches the same slot via pointer arithmetic — both must agree, which
+    // also regression-tests pointer-arithmetic metadata propagation.
+    check("main argv[0] is the program path", "extern fn strlen(s : void^) -> u64\nfn main(argc : i64, argv : str^)\n{\n    print(strlen(^argv) == strlen(^(argv + 0)));\n}\n", "true\n");
+
+    // Pointer arithmetic keeps the pointer operand's metadata through `:=`,
+    // reversed operands, and chained adds, so the result stays dereferenceable.
+    check("ptr arith metadata via decl", "extern fn strlen(s : void^) -> u64\nfn main(argc : i64, argv : str^)\n{\n    i := 1\n    x := argv + i\n    print(argc > 0 && strlen(^(argv + 0)) >= 0 && x != null);\n}\n", "true\n");
+    // Writes through an advanced pointer land in the right byte slots.
+    check("deref assign via ptr arith", "extern fn malloc(size : u64) -> void^\nfn main()\n{\n    buf := malloc(4) as u8^;\n    ^(buf + 1) = 66;\n    ^(buf + 2) = 67;\n    print(^(buf + 1));\n    print(^(buf + 2));\n}\n", "66\n67\n");
 
     // Typed struct declaration in a module: the declared type resolves to the
     // struct's real module, and so does an unqualified init (`Foo { ... }`),
@@ -2092,6 +2118,18 @@ static void error_tests() {
     check_error("unknown token", "fn main()\n{\n    print(2 @ 3);\n}\n");
     check_error("unclosed string", "fn main()\n{\n    print(\"abc);\n}\n");
     check_error("reserved __entry", "fn __entry() -> i64\n{\n    return 0;\n}\nfn main() -> i64\n{\n    return 0;\n}\n");
+    check_error("main too many arguments", "fn main(a : i64, b : i64, c : i64)\n{\n}\n", "at most 2 arguments");
+    check_error("main argc wrong type", "fn main(x : u8^^)\n{\n}\n", "First parameter of 'main' must be 'i64'");
+    check_error("main argv wrong type", "fn main(a : i64, b : i64)\n{\n}\n", "Second parameter of 'main' must be 'str^'");
+    // Arithmetic is only defined for numbers (+/- also for one pointer and one
+    // number). Strings/arrays/pointer mult used to slip through a MAX() type
+    // fallback and crash at runtime.
+    check_error("no string plus int", "fn main()\n{\n    s := \"abc\" + 1;\n}\n", "Invalid operands to PLUS operation");
+    check_error("no string times int", "fn main()\n{\n    s := \"abc\" * 2;\n}\n", "Invalid operands to MULT operation");
+    check_error("no array plus int", "fn main()\n{\n    arr := [1, 2];\n    x := arr + 1;\n}\n", "Invalid operands to PLUS operation");
+    check_error("no ptr mult", "extern fn malloc(size : u64) -> void^\nfn main()\n{\n    p := malloc(8) as u8^;\n    x := p * 2;\n}\n", "Invalid operands to MULT operation");
+    check_error("no ptr divide", "extern fn malloc(size : u64) -> void^\nfn main()\n{\n    p := malloc(8) as u8^;\n    x := p / 2;\n}\n", "Invalid operands to DIVIDE operation");
+    check_error("no two ptrs minus", "extern fn malloc(size : u64) -> void^\nfn main()\n{\n    a := malloc(8) as u8^;\n    b := malloc(8) as u8^;\n    d := a - b;\n}\n", "Invalid operands to MINUS operation");
     check_error("reserved __ prefix", "fn __mine() -> i64\n{\n    return 0;\n}\nfn main() -> i64\n{\n    return 0;\n}\n", "reserved '__' prefix");
     check_error("reserved __ prefix 2", "fn __x()\n{\n    print(1);\n}\nfn main()\n{\n    print(1);\n}\n", "reserved '__' prefix");
     check_error("reserved __ variable", "fn main()\n{\n    __x := 5;\n    print(__x);\n}\n", "reserved '__' prefix");
