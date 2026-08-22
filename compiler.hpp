@@ -1,3 +1,10 @@
+// `#run` executes compiled code inside the compiler process, so the scratch
+// shared library is loaded with the platform's dynamic-loader API. Only POSIX
+// hosts are supported for compile-time execution (the compiler itself).
+#if defined(__unix__) || defined(__APPLE__)
+    #include <dlfcn.h>
+#endif
+
 // ---- Enums ----
 enum TokenType {
     Tok_Ident,
@@ -91,6 +98,8 @@ enum ExpressionType {
     Expr_Index,
     Expr_IndexAssign,
     Expr_Assert,
+    Expr_Run,
+    Expr_ComptimeLib,
 };
 
 enum ValueType
@@ -297,6 +306,11 @@ struct Variable
     // Compile-time metadata only, used by `len()` and indexed access.
     ValueType array_elem = TYPE_NOP;
     s64 array_len = -1;
+    // Compile-time constant variable (`x := #run { ... }` or any expression
+    // that folded to a constant): every read folds to comp_time_val and no
+    // runtime slot store is emitted. Only numeric/bool values qualify.
+    bool is_comp_time = false;
+    s64 comp_time_val = 0;
 };
 
 
@@ -422,6 +436,22 @@ struct PrintExpr : Expression
 struct AssertExpr : Expression
 {
     Expression* rhs = nullptr;
+};
+
+// `#run { ... }`: a block executed at compile time. The block is wrapped in a
+// synthetic function, compiled to a scratch shared library and run in the
+// compiler process; its `return` value (i64) becomes a compile-time constant.
+struct RunExpr : Expression
+{
+    BlockExpr* block = nullptr;
+};
+
+// `#libc` / `#lib("path")`: registers a shared library to preload before
+// `#run` blocks execute, so their extern calls resolve against it. A no-op at
+// translation time.
+struct ComptimeLibExpr : Expression
+{
+    StrView path = ""; // "" = platform libc soname (#libc)
 };
 
 struct AssignmentExpr : Expression
@@ -805,8 +835,10 @@ public:
                     skip_char();
                 auto directive = source_view.sub_view(mark, get_index());
                 if (directive != "#assert" && directive != "#type_id"
-                    && directive != "#type_size" && directive != "#type_of")
-                    compiler_error(Token{Tok_Directive, directive}, "Unknown compile-time directive '" SV_FORMAT "', expected '#assert', '#type_id', '#type_size' or '#type_of'\n", SV_ARG(directive));
+                    && directive != "#type_size" && directive != "#type_of"
+                    && directive != "#run" && directive != "#libc"
+                    && directive != "#lib")
+                    compiler_error(Token{Tok_Directive, directive}, "Unknown compile-time directive '" SV_FORMAT "', expected '#assert', '#run', '#libc', '#lib', '#type_id', '#type_size' or '#type_of'\n", SV_ARG(directive));
                 _tokens.push(Token{Tok_Directive, directive});
             } else if (ch == '[') {
                 // Array literal (`[1, 2, 3]`) and postfix indexing (`arr[i]`).
@@ -940,6 +972,10 @@ struct DeclaredFunction
     // returns): the declared return struct's size plus any nested structs it
     // materializes. Set by translate_function_body.
     usize return_area_size = 0;
+    // Synthetic wrapper around a `#run { ... }` block: its body's trailing
+    // expression value becomes the implicit `return` (ordinary functions
+    // fall back to `return 0` instead).
+    bool is_comptime_wrapper = false;
     // `extern fn` FFI declaration: the symbol comes from the C linker, so the
     // compiler must not emit a body/label for it.
     bool is_extern = false;
@@ -951,6 +987,11 @@ struct DeclaredFunction
     // pointed back at this file while the body translates.
     StrView src_path = SV_LIT("");
     const char* src_content = "";
+    // Optimization/register passes (dead_code .. update_all_offsets) have
+    // already run on this function's ops. `#run` compiles a scratch shared
+    // library mid-translation, running the passes early; the final binary's
+    // emission must not run them twice.
+    bool passes_done = false;
     bool operator==(const DeclaredFunction& other) const {
         return name == other.name;
     }
@@ -1005,6 +1046,10 @@ struct Module {
 };
 
 // ---- Function declarations ----
+
+// Persistent storage for strings that must outlive parsing (synthetic
+// `#run` function names, copied `#lib("path")` library paths).
+static Array<StrBuilder>& comptime_name_pool();
 
 Expression* parse_primary(Lexer& lexer);
 Expression* parse_expression(Lexer& lexer, Expression* lhs = nullptr, int min_prec = 0, bool allow_assignment = true);
@@ -1481,6 +1526,30 @@ Array<Label> g_labels;
 // Running byte size of the __globals region, used to assign each global
 // variable its fixed slot offset (one full-width QWORD slot per variable).
 usize g_globals_size = 0;
+
+// ---- Compile-time execution (`#run`) ----
+// Shared libraries preloaded (dlopen, RTLD_GLOBAL) before a `#run` block
+// executes, so the block's extern calls resolve against them: `#libc` adds
+// the platform's libc soname, `#lib("path")` adds an explicit library.
+Array<StrView> g_comptime_libs;
+// Counter distinguishing successive `#run` blocks' synthetic functions and
+// scratch files.
+usize g_comptime_counter = 0;
+
+// Resolved addresses of extern (C FFI) symbols for compile-time execution.
+// The scratch shared object cannot carry PC32 relocations against undefined
+// symbols (`ld -shared` rejects them), so `#run` resolves every extern via
+// dlsym(RTLD_DEFAULT) *inside the compiler* and emits direct
+// `mov rax, <address>; call rax` sequences instead of symbolic calls.
+struct ComptimeExternAddress
+{
+    StrView name;
+    void* address = nullptr;
+};
+Array<ComptimeExternAddress> g_comptime_externs;
+// True while asm for a `#run` scratch library is being emitted, so the call
+// emitter routes extern calls through the resolved-address table above.
+bool g_comptime_emitting = false;
 
 // ---- Module system ----
 // Registry of every module declared by the compiled files (index 0/name "" is
@@ -1984,6 +2053,8 @@ const char* expr_type_to_str(ExpressionType type) {
         case Expr_Index: return "Index";
         case Expr_IndexAssign: return "IndexAssign";
         case Expr_Assert: return "Assert";
+        case Expr_Run: return "Run";
+        case Expr_ComptimeLib: return "ComptimeLib";
 
         default: UNREACHABLE("expr_type_to_str");
     }
@@ -2483,6 +2554,70 @@ Expression* parse_keyword(Lexer& lexer) {
             ASSERT_NOT_NULL(assert_expr->rhs);
             skip_semicolon_if_exist(lexer);
             return assert_expr;
+        }
+        if (tok.val == "#run") {
+            // `#run { ... }`: a compile-time block. Parsed as an ordinary
+            // block expression; execution happens during translation.
+            auto* run = new_expr<RunExpr>(tok, Expr_Run);
+            auto open = lexer.peak();
+            if (open.type != Tok_LBracket)
+                compiler_error(open, "Expected '{' after '#run', got '" SV_FORMAT "'\n", SV_ARG(open.val));
+            run->block = parse_block(lexer);
+            if (!run->block)
+                compiler_error(open, "Expected block after '#run'\n");
+            return run;
+        }
+        if (tok.val == "#libc" || tok.val == "#lib") {
+            // `#libc` / `#lib("path")`: register a shared library to preload
+            // before `#run` blocks execute, so their extern calls resolve
+            // against it. Registered at parse time (parsing finishes before
+            // any translation), so declaration order relative to `#run` does
+            // not matter.
+            StrView path = "";
+            if (tok.val == "#libc") {
+                path = SV_LIT("libc.so.6");
+                #if defined(__APPLE__)
+                    path = SV_LIT("libc.dylib");
+                #endif
+            } else {
+                auto open = lexer.next();
+                if (open.type != Tok_LParen)
+                    compiler_error(open, "Expected '(' after '#lib', got '" SV_FORMAT "'\n", SV_ARG(open.val));
+                auto str = lexer.next();
+                if (str.type != Tok_StrLit)
+                    compiler_error(str, "Expected a string literal inside #lib(...), got '" SV_FORMAT "'\n", SV_ARG(str.val));
+                auto close = lexer.next();
+                if (close.type != Tok_RParen)
+                    compiler_error(close, "Expected ')' after the '#lib' path, got '" SV_FORMAT "'\n", SV_ARG(close.val));
+                path = str.val;
+                // Relative paths resolve against the DECLARING SOURCE FILE's
+                // directory (library next to the code that uses it), so the
+                // compiler's working directory never matters.
+                bool absolute = path.size > 0 && path.data[0] == '/';
+                bool has_slash = false;
+                for (usize c = 0; c < path.size; ++c)
+                    if (path.data[c] == '/') has_slash = true;
+                comptime_name_pool().push(StrBuilder{});
+                auto& resolved = comptime_name_pool().last();
+                if (!absolute && !has_slash) {
+                    // Bare name: anchor at the source file's directory.
+                    usize last_slash = 0;
+                    bool found_slash = false;
+                    for (usize c = 0; c < src_path.size; ++c)
+                        if (src_path.data[c] == '/') { last_slash = c; found_slash = true; }
+                    if (found_slash)
+                        resolved.append(src_path.sub_view(0, last_slash + 1));
+                    else
+                        resolved.append("./");
+                }
+                resolved.append(path);
+                resolved.append_null(false);
+                g_comptime_libs.push(resolved.to_string_view(true));
+                skip_semicolon_if_exist(lexer);
+                return new_expr<ComptimeLibExpr>(tok, Expr_ComptimeLib);
+            }
+            skip_semicolon_if_exist(lexer);
+            return new_expr<ComptimeLibExpr>(tok, Expr_ComptimeLib);
         }
         // `#type_id(expr)` / `#type_size(expr)` / `#type_of(expr)`: the
         // reflection builtins. They lex as directives (so they can never be
@@ -3373,7 +3508,8 @@ Expression* parse_expression(Lexer& lexer, Expression* lhs, int min_prec, bool a
             || lhs->type == Expr_For || lhs->type == Expr_Return
             || lhs->type == Expr_Break || lhs->type == Expr_Continue
             || lhs->type == Expr_Function || lhs->type == Expr_Struct
-            || lhs->type == Expr_Block || lhs->type == Expr_Assert)
+            || lhs->type == Expr_Block || lhs->type == Expr_Assert
+            || lhs->type == Expr_Run || lhs->type == Expr_ComptimeLib)
             break;
 
        lexer.next();
@@ -5030,12 +5166,30 @@ bool compile_ops(StrBuilder& builder, Array<Instruction>& ops, Array<VirtualReg>
                     }
                     current_arg_offset += current_inst.call.args[i].size;
                 }
-                builder.append("\tcall ");
-                if (fn_is_extern(current_inst.call.name.val))
-                    builder.append(current_inst.call.name.val);
-                else
+                if (fn_is_extern(current_inst.call.name.val)) {
+                    // Compile-time emission resolves FFI targets to concrete
+                    // addresses (see g_comptime_externs): a shared object
+                    // cannot reference undefined symbols with PC32 relocs.
+                    void* resolved = nullptr;
+                    if (g_comptime_emitting) {
+                        for (auto& ce : g_comptime_externs) {
+                            if (ce.name == current_inst.call.name.val) {
+                                resolved = ce.address;
+                                break;
+                            }
+                        }
+                    }
+                    if (resolved) {
+                        (builder.append("\tmov rax, ") << (usize)resolved).append('\n');
+                        builder.append("\tcall rax\n");
+                    } else
+                        (builder.append("\tcall ")).append(current_inst.call.name.val).append('\n');
+                }
+                else {
+                    builder.append("\tcall ");
                     append_fn_label(builder, current_inst.call.name.val, current_inst.call.module);
-                builder.append('\n');
+                    builder.append('\n');
+                }
                 if (total_stack > 0)
                     builder.append("\tadd rsp, ") << total_stack << '\n';
 
@@ -6623,6 +6777,42 @@ static void append_string_data(StrBuilder& builder)
 // points (GetStdHandle / WriteConsoleA / ExitProcess), which the std library
 // calls indirectly through `call [symbol]`.
 // ------------------------------------------------------------------
+
+// Runs a toolchain command with its stdout/stderr going nowhere: both are
+// redirected into a memory pipe that the parent drains while the child runs.
+// Nothing is printed on success; on failure the captured output is echoed so
+// real diagnostics (fasm errors, ld errors) still reach the user. Returns
+// false when the process exited with an error.
+static bool execute_quietly(Cmd& cmd)
+{
+    int fds[2];
+    if (pipe(fds) != 0)
+        return cmd.execute().wait(); // cannot capture: fall back to a noisy run
+    fflush(stdout);
+    fflush(stderr);
+    CmdOptions opt{};
+    opt.print_command = false;
+    opt.stdout_desc = &fds[1];
+    opt.stderr_desc = &fds[1];
+    Process proc = cmd.execute(opt);
+    // The parent's copy of the write end must go away before reading,
+    // otherwise EOF never arrives even after the child exits.
+    close(fds[1]);
+    StrBuilder captured{};
+    char buffer[4096];
+    for (;;) {
+        ssize_t read_bytes = read(fds[0], buffer, sizeof(buffer));
+        if (read_bytes <= 0)
+            break;
+        captured.append(StrView(buffer, (usize)read_bytes));
+    }
+    close(fds[0]);
+    const bool ok = proc.wait();
+    if (!ok && captured.count() > 0)
+        fwrite(captured.data(), 1, captured.count(), stdout);
+    return ok;
+}
+
 bool compile_program(Array<Instruction>& global_ops, Array<VirtualReg>& global_regs)
 {
     const bool is_windows = is_windows_target();
@@ -6727,11 +6917,16 @@ bool compile_program(Array<Instruction>& global_ops, Array<VirtualReg>& global_r
         // with the C definition the linker resolves, so emit nothing for them.
         if (func.is_extern)
             continue;
-        dead_code(func);
-        dead_store_elim(func);
-        simplify_control_flow(func);
-        allocate_registers(func);
-        update_all_offsets(func.regs);
+        // `#run` may have already run the passes while building its scratch
+        // shared library; never run them twice.
+        if (!func.passes_done) {
+            dead_code(func);
+            dead_store_elim(func);
+            simplify_control_flow(func);
+            allocate_registers(func);
+            update_all_offsets(func.regs);
+            func.passes_done = true;
+        }
         compile_function(builder, func);
     }
     peephole_asm(builder, user_code_start);
@@ -6801,7 +6996,7 @@ bool compile_program(Array<Instruction>& global_ops, Array<VirtualReg>& global_r
 
     cmd.append(out_asm).append(' ');
     cmd.append(out_out);
-    if (!cmd.execute().wait()) {
+    if (!execute_quietly(cmd)) {
         log_error("Failed to assemble '" SV_FORMAT "'\n", SV_ARG(out_asm));
         return false;
     }
@@ -6817,7 +7012,14 @@ bool compile_program(Array<Instruction>& global_ops, Array<VirtualReg>& global_r
         // executable (a bare `ld -lc` has no interp and cannot load libc).
         cmd.append("-lc --dynamic-linker /lib64/ld-linux-x86-64.so.2 ");
     }
-    if (!cmd.execute().wait()) {
+    // Libraries registered with `#libc` / `#lib("path")` are linked into the
+    // final binary as well, so its own extern calls resolve at load time.
+    for (usize i = 0; i < g_comptime_libs.count(); ++i) {
+        StrBuilder lb{};
+        lb.append(g_comptime_libs[i]).append(' ');
+        cmd.append(lb.to_string_view(true));
+    }
+    if (!execute_quietly(cmd)) {
         log_error("Failed to link '" SV_FORMAT "'\n", SV_ARG(out_asm));
         return false;
     }
@@ -7176,6 +7378,18 @@ void translate_function_body(DeclaredFunction& fun)
     if (g_translating_functions.contains(fun.name)) return;
     g_translating_functions.push(fun.name);
 
+    // Stable index of `fun` inside g_functions: body translation can execute
+    // `#run` blocks, whose synthetic wrappers get appended to g_functions —
+    // reallocating it and dangling any held reference. Everything after the
+    // translate_to_instruction call below re-resolves through this index.
+    usize self_index = 0;
+    for (usize i = 0; i < g_functions.count(); ++i) {
+        if (&g_functions[i] == &fun) {
+            self_index = i;
+            break;
+        }
+    }
+
     // Symbol resolution inside the body happens against the function's own
     // module, regardless of which file declared it.
     StrView prev_module = g_current_module_name;
@@ -7268,7 +7482,11 @@ void translate_function_body(DeclaredFunction& fun)
     }
     const usize after_param_casts = body_ops.count();
     ValueType body_ret = TYPE_NOP;
-    translate_to_instruction(body_ops, body_regs, body_vars, fun.expr->block, body_ret);
+    auto body_value = translate_to_instruction(body_ops, body_regs, body_vars, fun.expr->block, body_ret);
+    // Re-resolve: the translation above may have run `#run` blocks whose
+    // synthetic wrappers reallocated g_functions (see the index capture at
+    // the top).
+    DeclaredFunction& self = g_functions[self_index];
 
     // Every defer flag starts at 0, so a `defer` in a branch that never ran
     // cannot fire. The inits are placed right after the param-truncation casts
@@ -7281,7 +7499,7 @@ void translate_function_body(DeclaredFunction& fun)
             pre_ops.push(body_ops[i]);
         for (auto& dc : g_deferred_calls) {
             auto& zero = make_const(body_regs, TYPE_BOOL, 0);
-            pre_ops.push(Instruction{.type = OP_CAST, .location = fun.expr->tok, .binop = {OP_CAST, zero.index, zero.index}, .reg_index = dc.flag_reg, .is_visited = true});
+            pre_ops.push(Instruction{.type = OP_CAST, .location = self.expr->tok, .binop = {OP_CAST, zero.index, zero.index}, .reg_index = dc.flag_reg, .is_visited = true});
         }
         for (usize i = after_param_casts; i < body_ops.count(); ++i)
             pre_ops.push(body_ops[i]);
@@ -7291,26 +7509,37 @@ void translate_function_body(DeclaredFunction& fun)
     // Append a trailing return so a void function (or one whose last statement
     // isn't a `return`) never falls off the end of its body. The implicit
     // `return 0` also gives `main` exit code 0 when it has no explicit return.
+    // A `#run` wrapper returns the block's value instead: the trailing
+    // expression (`#run { 40 + 2 }`) is the result even without an explicit
+    // `return`.
     if (body_ops.count() == 0 || body_ops[body_ops.count() - 1].type != OP_RET) {
         emit_deferred_calls(body_ops, body_regs);
-        auto& ret_reg = make_const(body_regs, TYPE_I64, 0);
-        body_ops.push(Instruction{.type = OP_RET, .location = fun.expr->tok, .reg_index = ret_reg.index, .is_visited = true});
+        VirtualReg zero_value = make_const(body_regs, TYPE_I64, 0);
+        const bool use_body_value = self.is_comptime_wrapper && body_ret != TYPE_NOP && body_ret != TYPE_VOID;
+        VirtualReg& ret_source = use_body_value ? body_value : zero_value;
+        body_ops.push(Instruction{.type = OP_RET, .location = self.expr->tok, .reg_index = ret_source.index, .is_visited = true});
     }
     g_deferred_calls = prev_deferred;
 
     if (declared_ret != TYPE_NOP)
-        fun.return_type = declared_ret;
-    else
+        self.return_type = declared_ret;
+    else {
+        // A `#run` wrapper with no explicit `return` still has a type: the
+        // trailing expression's (`#run { 40 + 2 }` yields i64), so the block
+        // result can carry bool/narrow-int types too.
+        if (self.is_comptime_wrapper && g_live_function_return_type == TYPE_NOP && body_ret != TYPE_NOP)
+            g_live_function_return_type = body_ret;
         // No `-> type`: the return type was inferred from the body's `return`
         // statements. Still TYPE_NOP (no `return` in the body) means void.
-        fun.return_type = g_live_function_return_type != TYPE_NOP ? g_live_function_return_type : TYPE_VOID;
+        self.return_type = g_live_function_return_type != TYPE_NOP ? g_live_function_return_type : TYPE_VOID;
+    }
 
     // Callers must reserve at least the declared struct's bytes, and every
     // `return` may append nested struct regions past that, so keep the max.
     if (returns_struct) {
         usize declared_total = 0;
         u32 declared_align = 1;
-        auto sidx = find_visible_struct(fun.expr->return_struct_name, fun.expr->return_struct_module);
+        auto sidx = find_visible_struct(self.expr->return_struct_name, self.expr->return_struct_module);
         if (g_structs.is_valid_index(sidx) && g_structs[sidx].expr) {
             declared_total = g_structs[sidx].expr->total_size;
             declared_align = g_structs[sidx].expr->align;
@@ -7319,11 +7548,11 @@ void translate_function_body(DeclaredFunction& fun)
         // of the struct's alignment (g_return_area_max already aligns each
         // nested region during emission).
         declared_total = (declared_total + declared_align - 1) / declared_align * declared_align;
-        fun.return_area_size = MAX(g_return_area_max, declared_total);
+        self.return_area_size = MAX(g_return_area_max, declared_total);
     }
 
-    fun.ops = body_ops;
-    fun.regs = body_regs;
+    self.ops = body_ops;
+    self.regs = body_regs;
 
     g_return_slot_reg = prev_slot;
     g_function_hidden_slot = prev_hidden;
@@ -7773,6 +8002,267 @@ static s64 str_literal_index_of(Expression* rhs, Array<Variable>* local_vars)
     return -1;
 }
 
+// ---- Compile-time execution (`#run`) ----
+// Nesting guard: a `#run` block translates its body through the ordinary
+// pipeline, so a `#run` inside it (directly or in a callee) would re-enter
+// this executor and mutate g_functions mid-iteration.
+static usize g_comptime_depth = 0;
+
+// Persistent storage for the synthetic functions' names (the StrView outlives
+// the local StrBuilder).
+static Array<StrBuilder>& comptime_name_pool()
+{
+    static Array<StrBuilder> pool{};
+    return pool;
+}
+
+
+// Execute one `#run { ... }` block at compile time:
+//   1. wrap the block in a synthetic function (`__comptime_run<N>`) and
+//      translate it through the ordinary body pipeline,
+//   2. emit every translated function into a scratch ELF64 shared object,
+//      assembled with fasm and linked with `ld -shared`,
+//   3. preload the libraries registered by `#libc` / `#lib("path")` with
+//      RTLD_GLOBAL, so the block's `extern fn` calls resolve against them,
+//   4. dlopen the scratch library in the compiler process, dlsym the
+//      synthetic function and call it; its i64 return value becomes a
+//      compile-time constant.
+static s64 execute_comptime_run(RunExpr* run, ValueType& out_type)
+{
+    out_type = TYPE_I64;
+#if !defined(__unix__) && !defined(__APPLE__)
+    compiler_error(run->tok, "#run is only supported on POSIX hosts (the block executes inside the compiler process)\n");
+    return 0;
+#else
+    if (g_comptime_depth > 0)
+        compiler_error(run->tok, "#run blocks cannot be nested\n");
+    g_comptime_depth++;
+
+    // 1. Synthetic wrapper function: empty arg list, return type inferred
+    //    from the block's `return`s (i64 when a value is returned, void
+    //    otherwise).
+    auto* fn_expr = new_expr<FunctionExpr>(run->tok, Expr_Function);
+    fn_expr->block = run->block;
+    comptime_name_pool().push(StrBuilder{});
+    auto& name_builder = comptime_name_pool().last();
+    (name_builder.append("__comptime_run") << g_comptime_counter).append_null(false);
+    const usize this_counter = g_comptime_counter;
+    g_comptime_counter++;
+    // Reserve before pushing: the caller frames above (translate_function_body,
+    // Expr_Call's callee binding) hold references into g_functions, and the
+    // append must never reallocate the array out from under them.
+    g_functions.reserve(g_functions.count() + 1);
+    g_functions.push(DeclaredFunction{name_builder.to_string_view(true), fn_expr, {}, {}, TYPE_NOP, StrView(""), StrView(""), TYPE_NOP, 0, StrView(""), StrView("")});
+    const usize fun_index = g_functions.count() - 1;
+    g_functions.last().module_name = g_current_module_name;
+    g_functions.last().src_path = src_path;
+    g_functions.last().src_content = src_content;
+    g_functions.last().is_comptime_wrapper = true;
+    translate_function_body(g_functions[fun_index]);
+    // Callee bodies need no forcing: every call site translates its callee
+    // eagerly (see the Expr_Call case), so the whole call graph reachable from
+    // this block is complete after the one translate_function_body call.
+    // Functions it never calls stay untranslated here and are emitted as
+    // label-only stubs in the scratch library (never executed).
+
+    // 2. Shared-object assembly: the executable path's ELF emission minus the
+    //    __entry synthesis (a library has no entry point).
+    bool has_extern = false;
+    for (usize i = 0; i < g_functions.count(); ++i)
+        if (g_functions[i].is_extern) {
+            has_extern = true;
+            break;
+        }
+    StrBuilder label_b{};
+    append_fn_label(label_b, g_functions[fun_index].name, g_functions[fun_index].module_name);
+    label_b.append_null(false);
+
+    // 3. Preload registered libraries into the global scope: the scratch
+    //    library keeps its extern symbols undefined, and the dynamic loader
+    //    resolves them against everything loaded RTLD_GLOBAL (libc included).
+    for (usize i = 0; i < g_comptime_libs.count(); ++i) {
+        StrBuilder lib_b{};
+        lib_b.append(g_comptime_libs[i]).append_null(false);
+        auto lib_path = lib_b.to_string_view(true);
+        // A bare name ("test.dll", "mylib.so") follows the loader's standard
+        // search paths; a relative path without a directory separator also
+        // tries the compiler's working directory.
+        void* lib_handle = dlopen(lib_path.data, RTLD_NOW | RTLD_GLOBAL);
+        if (!lib_handle && !lib_path.starts_with("/")) {
+            bool has_slash = false;
+            for (usize c = 0; c < lib_path.size; ++c)
+                if (lib_path.data[c] == '/') has_slash = true;
+            if (!has_slash) {
+                StrBuilder local_b{};
+                local_b.append("./").append(lib_path).append_null(false);
+                lib_handle = dlopen(local_b.to_string_view(true).data, RTLD_NOW | RTLD_GLOBAL);
+            }
+        }
+        if (!lib_handle) {
+            const char* err = dlerror();
+            compiler_error(run->tok, "#lib failed to load '" SV_FORMAT "': %s\n", SV_ARG(lib_path), err ? err : "unknown dlopen error");
+        }
+    }
+
+    // Resolve every extern symbol now, inside the compiler process: the
+    // preloaded libraries (and libc, always present) are searched through the
+    // global scope. Resolving here also turns a missing library into a clear
+    // compile error instead of a runtime dlopen failure.
+    g_comptime_externs.set_count(0);
+    for (usize i = 0; i < g_functions.count(); ++i) {
+        if (!g_functions[i].is_extern)
+            continue;
+        StrBuilder sym_b{};
+        sym_b.append(g_functions[i].name).append_null(false);
+        void* address = dlsym(RTLD_DEFAULT, sym_b.to_string_view(true).data);
+        if (!address) {
+            const char* err = dlerror();
+            compiler_error(run->tok, "#run could not resolve extern function '" SV_FORMAT "' from #libc or #lib libraries%s%s\n", SV_ARG(g_functions[i].name), err ? ": " : "", err ? err : "");
+        }
+        g_comptime_externs.push(ComptimeExternAddress{g_functions[i].name, address});
+    }
+    g_comptime_emitting = true;
+
+    StrBuilder builder{};
+    builder.append("format ELF64\n\nsection '.text' executable\n");
+    builder.append("public ").append(label_b.to_string_view(true)).append('\n');
+    for (usize i = 0; i < g_functions.count(); ++i)
+        if (g_functions[i].is_extern)
+            (builder.append("extrn ").append(g_functions[i].name)).append('\n');
+    // The std helpers are emitted with their raw-syscall paths (no `call
+    // exit`): a shared object cannot carry PC32 relocations against undefined
+    // symbols, and the block's own calls go through resolved addresses.
+    builder.append('\n');
+    add_std_library(builder, false, false);
+    for (usize i = 0; i < g_functions.count(); ++i) {
+        auto& func = g_functions[i];
+        if (func.is_extern)
+            continue;
+        // Only bodies that finished translating are compiled here. A function
+        // currently being translated (the one containing this very `#run`) or
+        // not yet reached (declared later in the file) still has empty ops:
+        // running the passes now would freeze that partial state
+        // (passes_done=true blocks the real run later), so it is left out of
+        // the scratch library entirely — nothing there can call it anyway,
+        // and `ld -shared` tolerates the undefined references.
+        if (func.ops.count() == 0)
+            continue;
+        // The passes run exactly once per function: here for the scratch
+        // library, and compile_program skips anything already prepared.
+        if (!func.passes_done) {
+            dead_code(func);
+            dead_store_elim(func);
+            simplify_control_flow(func);
+            allocate_registers(func);
+            update_all_offsets(func.regs);
+            func.passes_done = true;
+        }
+        compile_function(builder, func);
+    }
+    g_comptime_emitting = false;
+    builder.append("\nsection '.data' writeable\n");
+    append_string_data(builder);
+    usize globals_bytes = g_globals_size < 1 ? 1 : g_globals_size;
+    builder.append("\nsection '.bss' writeable\n");
+    (builder.append("\t__globals: rb ") << globals_bytes).append('\n');
+
+    // Scratch artifacts live next to the output path and are removed after
+    // the block finishes.
+    StrBuilder asm_b{}, obj_b{}, so_b{};
+    asm_b.append(out_path) << ".ct" << this_counter << ".asm";
+    obj_b.append(out_path) << ".ct" << this_counter << ".obj";
+    so_b.append(out_path) << ".ct" << this_counter << ".so";
+    asm_b.append_null(false);
+    obj_b.append_null(false);
+    so_b.append_null(false);
+    auto asm_path = asm_b.to_string_view(true);
+    auto obj_path = obj_b.to_string_view(true);
+    auto so_path = so_b.to_string_view(true);
+
+    FILE* file = fopen(asm_path.data, "wb");
+    if (!file) {
+        log_error("Failed to open scratch file '" SV_FORMAT "'\n", SV_ARG(asm_path));
+        exit(1);
+    }
+    fwrite(builder.data(), 1, builder.count(), file);
+    fclose(file);
+
+    Cmd fasm_cmd{};
+    fasm_cmd.push("./deps/fasm/fasm");
+    fasm_cmd.append(asm_path).append(' ');
+    fasm_cmd.append(obj_path);
+    if (!execute_quietly(fasm_cmd)) {
+        log_error("Failed to assemble compile-time code '" SV_FORMAT "'\n", SV_ARG(asm_path));
+        exit(1);
+    }
+    Cmd ld_cmd{};
+    ld_cmd.push("ld", "-shared", "-o");
+    ld_cmd.append(so_path).append(' ');
+    ld_cmd.append(obj_path);
+    if (!execute_quietly(ld_cmd)) {
+        log_error("Failed to link compile-time code '" SV_FORMAT "'\n", SV_ARG(so_path));
+        exit(1);
+    }
+
+    // 4. Load and call. dlopen only treats the argument as a path when it
+    //    contains a slash — a bare "prog.ct0.so" next to the output would
+    //    search the loader's library paths instead of the current directory
+    //    (unlike Windows). Make it explicit in that case.
+    StrBuilder dlopen_b{};
+    dlopen_b.append(so_path);
+    bool has_slash = false;
+    for (usize c = 0; c < so_path.size; ++c)
+        if (so_path.data[c] == '/') has_slash = true;
+    if (!has_slash) {
+        StrBuilder local_b{};
+        local_b.append("./").append(so_path).append_null(false);
+        dlopen_b = local_b;
+    }
+    dlopen_b.append_null(false);
+    void* handle = dlopen(dlopen_b.to_string_view(true).data, RTLD_NOW | RTLD_LOCAL);
+    if (!handle) {
+        const char* err = dlerror();
+        compiler_error(run->tok, "#run failed to load compiled block '%s': %s\n", so_path.data, err ? err : "unknown dlopen error");
+    }
+    void* symbol = dlsym(handle, label_b.to_string_view(true).data);
+    if (!symbol) {
+        const char* err = dlerror();
+        dlclose(handle);
+        compiler_error(run->tok, "#run block symbol '" SV_FORMAT "' not found: %s\n", SV_ARG(label_b.to_string_view(true)), err ? err : "unknown dlsym error");
+    }
+    // The wrapper's inferred return type decides how rax is interpreted:
+    // integers and bools come back in rax; anything else (structs, strings)
+    // is not a compile-time constant.
+    const ValueType wrapper_type = g_functions[fun_index].return_type;
+    s64 result = 0;
+    switch (wrapper_type) {
+        case TYPE_BOOL:
+        case TYPE_I8: case TYPE_U8:
+        case TYPE_I16: case TYPE_U16:
+        case TYPE_I32: case TYPE_U32:
+        case TYPE_I64: case TYPE_U64:
+            result = reinterpret_cast<s64 (*)(void)>(symbol)();
+            break;
+        case TYPE_VOID: case TYPE_NOP:
+            // Statement-style block (`#run { print(1); }`): no value, but the
+            // side effects must still happen.
+            reinterpret_cast<s64 (*)(void)>(symbol)();
+            break;
+        default:
+            dlclose(handle);
+            compiler_error(run->tok, "#run block returns %s, which cannot be a compile-time constant\n", value_type_to_str(wrapper_type));
+    }
+    out_type = wrapper_type;
+    dlclose(handle);
+    unlink(asm_path.data);
+    unlink(obj_path.data);
+    unlink(so_path.data);
+
+    g_comptime_depth--;
+    return result;
+#endif
+}
+
 VirtualReg translate_to_instruction(Array<Instruction>& ops, Array<VirtualReg>& regs, Array<Variable>& local_vars, Expression* expr, ValueType& return_type)
 {
     if (!expr) return {};
@@ -7977,6 +8467,17 @@ VirtualReg translate_to_instruction(Array<Instruction>& ops, Array<VirtualReg>& 
                     compiler_error(bin_expr->tok, "Use of undeclared variable: '" SV_FORMAT "'\n", SV_ARG(bin_expr->tok.val));
                 }
                 return_type = var->type;
+                // A compile-time constant variable (`x := #run { ... }`) folds
+                // to its value; the PUSH materializes it only if a runtime
+                // context (print, store) actually consumes the read.
+                if (var->is_comp_time) {
+                    auto& const_reg = allocate_reg(regs);
+                    const_reg.is_comp_time = true;
+                    const_reg.type = var->type;
+                    const_reg.int_val = var->comp_time_val;
+                    ops.push(Instruction{.type = var->type == TYPE_BOOL ? OP_PUSH_BOOL : OP_PUSH_I64, .location = bin_expr->tok, .reg_index = const_reg.index});
+                    return const_reg;
+                }
                 // auto& reg = allocate_reg(regs);
                 auto& var_reg = regs[var->reg_index];
                 return var_reg;
@@ -8110,11 +8611,15 @@ VirtualReg translate_to_instruction(Array<Instruction>& ops, Array<VirtualReg>& 
             auto* block_expr = dynamic_cast<BlockExpr*>(expr);
             ASSERT_NOT_NULL(block_expr);
             auto before_vars = local_vars.count();
+            // The block's value is its last statement's value (`#run { 40 + 2 }`
+            // evaluates to 42); statements after the last overwrite it.
+            VirtualReg last_value{};
             for (auto& statement : block_expr->exprs) {
-                translate_to_instruction(ops, regs, local_vars, statement, return_type);
+                last_value = translate_to_instruction(ops, regs, local_vars, statement, return_type);
             }
             for (; before_vars < local_vars.count(); ++before_vars)
                 local_vars[before_vars].is_accesible = false;
+            return last_value;
         } break;
 
         case Expr_Return: {
@@ -8283,6 +8788,35 @@ VirtualReg translate_to_instruction(Array<Instruction>& ops, Array<VirtualReg>& 
                 : value.int_val < 1;
             if (failed)
                 compiler_error(assert_expr->tok, "#assert failed: expression evaluated to %lld\n", (long long)value.int_val);
+        } break;
+
+        case Expr_ComptimeLib: {
+            // `#libc` / `#lib("path")`: registered at parse time; nothing to
+            // emit.
+        } break;
+
+        case Expr_Run: {
+            // `#run { ... }`: execute the block in the compiler process right
+            // now; the result becomes a compile-time constant of the block's
+            // inferred type (any integer width or bool), so
+            // `x := #run { return 6 * 7; }` folds x to 42 with zero runtime
+            // code emitted for the block itself.
+            auto* run = dynamic_cast<RunExpr*>(expr);
+            ASSERT_NOT_NULL(run);
+            ValueType run_type = TYPE_I64;
+            const s64 result = execute_comptime_run(run, run_type);
+            return_type = run_type == TYPE_NOP ? TYPE_I64 : run_type;
+            // Like a literal: the register folds at compile time AND
+            // materializes through its OP_PUSH when a runtime context needs it
+            // (e.g. `print(#run { return 1 })`).
+            auto& reg = allocate_reg(regs);
+            reg.is_comp_time = true;
+            reg.type = return_type;
+            reg.int_val = result;
+            if (return_type == TYPE_BOOL)
+                reg.bool_val = result != 0;
+            ops.push(Instruction{.type = return_type == TYPE_BOOL ? OP_PUSH_BOOL : OP_PUSH_I64, .location = run->tok, .reg_index = reg.index});
+            return reg;
         } break;
 
         case Expr_AddressOf: {
@@ -8550,9 +9084,20 @@ VirtualReg translate_to_instruction(Array<Instruction>& ops, Array<VirtualReg>& 
                 if (!is_numeric_type(return_type) || !is_numeric_type(assign->declared_type))
                     compiler_error(assign->rhs->tok, "Cannot assign %s to %s variable\n", value_type_to_str(return_type), value_type_to_str(assign->declared_type));
                 if (!cast_is_free(return_type, assign->declared_type)) {
+                    // A compile-time constant keeps its value through the
+                    // declared type: there is no runtime code to cast, and
+                    // replacing the register would lose it (the capture below
+                    // reads rhs.int_val).
                     auto& cast_reg = allocate_reg(regs);
                     cast_reg.type = assign->declared_type;
-                    ops.push(Instruction{.type = OP_CAST, .location = assign->tok, .binop = {OP_CAST, rhs.index, rhs.index}, .reg_index = cast_reg.index});
+                    if (rhs.is_comp_time) {
+                        cast_reg.is_comp_time = true;
+                        cast_reg.int_val = rhs.int_val;
+                        if (assign->declared_type == TYPE_BOOL)
+                            cast_reg.bool_val = rhs.int_val != 0;
+                    } else {
+                        ops.push(Instruction{.type = OP_CAST, .location = assign->tok, .binop = {OP_CAST, rhs.index, rhs.index}, .reg_index = cast_reg.index});
+                    }
                     rhs = cast_reg;
                 }
                 return_type = assign->declared_type;
@@ -8709,6 +9254,29 @@ VirtualReg translate_to_instruction(Array<Instruction>& ops, Array<VirtualReg>& 
                 if (!var || !var->is_accesible) {
                     compiler_error(assign->tok, "Use of undeclared variable: '" SV_FORMAT "'\n", SV_ARG(assign->tok.val));
                 }
+            }
+            // ONLY a direct `x := #run { ... }` makes the variable itself a
+            // compile-time constant: every read folds to the value and no slot
+            // store is emitted; reassignment requires another `#run`. Plain
+            // literals keep ordinary runtime semantics — folding them broke
+            // loop counters (`for i := 0 .. n` never stored i, so reads of the
+            // counter folded to its initial 0 forever).
+            if (assign->rhs->type == Expr_Run || (var && var->is_comp_time)) {
+                if (assign->rhs->type != Expr_Run)
+                    compiler_error(assign->rhs->tok, "Cannot assign a runtime value to compile-time constant '" SV_FORMAT "'\n", SV_ARG(var->name));
+                var->is_comp_time = true;
+                var->comp_time_val = rhs.int_val;
+                if (!var->is_local) {
+                    for (auto& gv : g_vars) {
+                        if (gv.name == var->name && (assign->module_name.size == 0 || gv.module_name == assign->module_name)) {
+                            gv.is_comp_time = true;
+                            gv.comp_time_val = rhs.int_val;
+                            break;
+                        }
+                    }
+                }
+                return_type = TYPE_VOID;
+                return res;
             }
             ops.push(Instruction{.type = OP_STORE, .data_type = TYPE_VARIABLE, .location = assign->tok, .target = {*var}, .reg_index = rhs.index});
             return_type = TYPE_VOID;

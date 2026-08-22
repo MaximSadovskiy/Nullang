@@ -41,6 +41,9 @@
 #ifndef SL_ARRAY_FREE
 #   define SL_ARRAY_FREE(ptr) free((ptr))
 #endif // SL_ARRAY_FREE
+#ifndef SL_ARRAY_MEMCOPY
+#   define SL_ARRAY_MEMCOPY(dst, src, size) memcpy((dst), (src), (size))
+#endif // SL_ARRAY_MEMCOPY
 
 // Set initial size of local array.
 //  If size was excedeed, it will allocate more with ARRAY_REALLOC or Allocator
@@ -412,9 +415,12 @@ namespace Sl
                     new_data = (T*)SL_ARRAY_REALLOC(nullptr, needed_capacity_bytes);
                 ASSERT_DEBUG(new_data != nullptr);
                 const auto new_count = needed_capacity < _count ? needed_capacity : _count;
+                // Relocate bitwise, matching resize()'s realloc model: these
+                // arrays hold relocatable values (heap pointers stay valid),
+                // and T need not be move-assignable.
+                if (new_count > 0)
+                    SL_ARRAY_MEMCOPY(new_data, _data, new_count * sizeof(T));
                 for (usize i = 0; i < new_count; ++i)
-                    new_data[i] = std::move(_data[i]);
-                for (usize i = new_count; i < _count; ++i)
                     _data[i].~T();
                 if (!_allocator) SL_ARRAY_FREE(_data);
                 _data = new_data;
